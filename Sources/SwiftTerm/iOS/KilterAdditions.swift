@@ -38,5 +38,13 @@ public extension TerminalView {
         selection.pivotExtend(row: hit.grid.row, col: hit.grid.col)
         setNeedsDisplay(bounds)
     }
+
+    /// Turn SwiftTerm's OWN selection engine on/off (taps, long-press, and
+    /// the selection pan). kilter disables it in Read mode so a single
+    /// custom drag gesture is the sole selector — one engine, one highlight.
+    func kilterSetNativeSelectionEnabled(_ on: Bool) {
+        for g in kilterNativeSelectionGestures { g.isEnabled = on }
+        if on { enableSelectionPanGesture() } else { disableSelectionPanGesture() }
+    }
 }
 #endif

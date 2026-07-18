@@ -1043,6 +1043,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         panSelectionGesture = nil
     }
     
+    /// kilter: native selection recognizers, stored so the app can turn
+    /// the whole native-selection engine off (Read = one custom gesture).
+    public var kilterNativeSelectionGestures: [UIGestureRecognizer] = []
+
     func setupGestures ()
     {
         let longPress = UILongPressGestureRecognizer (target: self, action: #selector(longPress(_:)))
@@ -1062,6 +1066,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
         singleTap.require(toFail: doubleTap)
         doubleTap.require(toFail: tripleTap)
+        kilterNativeSelectionGestures = [longPress, singleTap, doubleTap, tripleTap]
     }
 
     func setupLinkReportingInteractions ()
