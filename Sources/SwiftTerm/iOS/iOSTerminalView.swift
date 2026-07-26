@@ -1034,6 +1034,22 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         addGestureRecognizer(gesture)
         self.panSelectionGesture = gesture
     }
+
+    /// kilter: a selection drag is a ONE-finger gesture — two fingers are a
+    /// scroll. The selection pan is created with no touch-count limit the
+    /// moment a double-tap selects a word, so with a selection active a
+    /// two-finger scroll used to feed the drag-extend handler instead: the
+    /// selection stretched and the view never moved (owner device report,
+    /// 2026-07-26). Deliberately NOT `maximumNumberOfTouches = 1` — that
+    /// makes the recognizer ignore the second touch entirely, so
+    /// `numberOfTouches` reads 1 and the two-finger case becomes
+    /// undetectable. Gate at the begin decision instead.
+    open override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === panSelectionGesture, gestureRecognizer.numberOfTouches >= 2 {
+            return false
+        }
+        return super.gestureRecognizerShouldBegin(gestureRecognizer)
+    }
     
     func disableSelectionPanGesture() {
         guard let gesture = panSelectionGesture else {
