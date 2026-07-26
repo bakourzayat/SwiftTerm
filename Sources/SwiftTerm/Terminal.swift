@@ -679,9 +679,13 @@ open class Terminal {
         normalBuffer = Buffer(cols: cols, rows: rows, tabStopWidth: tabStopWidth, scrollback: options.scrollback)
         normalBuffer.fillViewportRows()
 
-        // The alt buffer should never have scrollback.
-        // See http://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-The-Alternate-Screen-Buffer
-        altBuffer = Buffer (cols: cols, rows: rows, tabStopWidth: tabStopWidth, scrollback: nil)
+        // xterm says the alt buffer should never have scrollback
+        // (http://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-The-Alternate-Screen-Buffer);
+        // `options.altBufferScrollback` deliberately opts out of that — see
+        // its doc comment for why (tmux scroll regions), and iTerm2 for
+        // precedent.
+        altBuffer = Buffer (cols: cols, rows: rows, tabStopWidth: tabStopWidth,
+                            scrollback: options.altBufferScrollback ? options.scrollback : nil)
         buffer = normalBuffer
 
         cc = CC(send8bit: false)

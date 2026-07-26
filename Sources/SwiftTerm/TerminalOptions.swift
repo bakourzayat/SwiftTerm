@@ -78,6 +78,17 @@ public struct TerminalOptions {
     /// behavior. `.narrow` matches system wcwidth() and avoids cursor divergence with tmux.
     public var regionalIndicatorWidth: RegionalIndicatorWidth
 
+    /// When true, the alternate screen buffer keeps a scrollback of its own
+    /// (capacity `scrollback`, same as the normal buffer) instead of the
+    /// xterm-mandated none. xterm's rationale — full-screen apps repaint, so
+    /// scrollback would be garbage — does not hold for a terminal whose
+    /// primary workload is tmux: tmux scrolls its pane through a scroll
+    /// region, so exactly the lines that scroll off the pane accumulate,
+    /// and cursor-addressed repaints (vim, TUIs) never touch it. This is
+    /// the same deliberate deviation iTerm2 ships as "Save lines to
+    /// scrollback in alternate screen mode". Default false (xterm behavior).
+    public var altBufferScrollback: Bool
+
     /// Default options
     public static let `default` = TerminalOptions.init(cols: 80,
                                                        rows: 25,
@@ -90,11 +101,13 @@ public struct TerminalOptions {
                                                        enableSixelReported: true,
                                                        kittyImageCacheLimitBytes: 320 * 1024 * 1024,
                                                        ansi256PaletteStrategy: .base16Lab,
-                                                       regionalIndicatorWidth: .wide)
+                                                       regionalIndicatorWidth: .wide,
+                                                       altBufferScrollback: false)
 
   public init(cols: Int = Self.default.cols, rows: Int = Self.default.rows, convertEol: Bool = Self.default.convertEol, termName: String = Self.default.termName, cursorStyle: CursorStyle = Self.default.cursorStyle, screenReaderMode: Bool = Self.default.screenReaderMode, scrollback: Int = Self.default.scrollback, tabStopWidth: Int = Self.default.tabStopWidth,
               enableSixelReported: Bool = Self.default.enableSixelReported, kittyImageCacheLimitBytes: Int = Self.default.kittyImageCacheLimitBytes, ansi256PaletteStrategy: Ansi256PaletteStrategy = Self.default.ansi256PaletteStrategy,
-              regionalIndicatorWidth: RegionalIndicatorWidth = Self.default.regionalIndicatorWidth) {
+              regionalIndicatorWidth: RegionalIndicatorWidth = Self.default.regionalIndicatorWidth,
+              altBufferScrollback: Bool = false) {
         self.cols = cols
         self.rows = rows
         self.convertEol = convertEol
@@ -107,5 +120,6 @@ public struct TerminalOptions {
         self.kittyImageCacheLimitBytes = kittyImageCacheLimitBytes
         self.ansi256PaletteStrategy = ansi256PaletteStrategy
         self.regionalIndicatorWidth = regionalIndicatorWidth
+        self.altBufferScrollback = altBufferScrollback
     }
 }

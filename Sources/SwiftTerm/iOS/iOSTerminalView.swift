@@ -1464,15 +1464,59 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
     }
     
+    /// The buffer the scroller state below belongs to — a buffer switch
+    /// (alt ⇄ normal) is a brand-new screen, so the position bookkeeping
+    /// resets and the view pins to the live edge.
+    private weak var scrollerBuffer: Buffer? = nil
+    /// `linesTop` of `scrollerBuffer` at the last update — the number of
+    /// lines a full scrollback had trimmed off the front by then. The delta
+    /// since is how far the same text has shifted toward index 0.
+    private var scrollerLinesTop = 0
+
     func updateScroller ()
     {
+        // Historical behavior pinned `contentOffset` to the bottom
+        // UNCONDITIONALLY, and this runs from `scrolled` — i.e. on every
+        // line that enters scrollback while output streams. Net effect: a
+        // reader who had scrolled up was yanked back to the live edge by
+        // the next burst of output. The rule every desktop terminal
+        // follows instead: stick to the bottom only when the view IS at
+        // the bottom; otherwise hold the reading position steady.
         let displayBuffer = terminal.displayBuffer
-        contentSize = CGSize (width: CGFloat (displayBuffer.cols) * cellDimension.width,
-                              height: CGFloat (displayBuffer.lines.count) * cellDimension.height)
-        //contentOffset = CGPoint (x: 0, y: CGFloat (displayBuffer.lines.count-displayBuffer.rows)*cellDimension.height)
-        contentOffset = CGPoint (x: 0, y: CGFloat (displayBuffer.lines.count-displayBuffer.rows)*cellDimension.height)
-        //Xscroller.doubleValue = scrollPosition
-        //Xscroller.knobProportion = scrollThumbsize
+        let newContentHeight = CGFloat (displayBuffer.lines.count) * cellDimension.height
+        let newSize = CGSize (width: CGFloat (displayBuffer.cols) * cellDimension.width,
+                              height: newContentHeight)
+        let bottomY = max (0, newContentHeight - bounds.height)
+
+        if displayBuffer !== scrollerBuffer {
+            // New screen (first layout, or alt ⇄ normal switch): live edge.
+            scrollerBuffer = displayBuffer
+            scrollerLinesTop = displayBuffer.linesTop
+            contentSize = newSize
+            contentOffset = CGPoint (x: 0, y: bottomY)
+            return
+        }
+
+        // Within half a cell of the pre-update bottom counts as "at the
+        // live edge" — a fling can settle fractionally short of the exact
+        // pixel and must still behave as bottom-pinned.
+        let wasAtLiveEdge = contentOffset.y >= (contentSize.height - bounds.height) - cellDimension.height / 2
+
+        // When the scrollback is full, each new line trims one off the
+        // front and every surviving line's index drops by one — the same
+        // text sits one cell HIGHER in content coordinates. Shift the
+        // offset by the trimmed count so the text under the reader's eyes
+        // stays stationary instead of crawling upward.
+        let trimmed = max (0, displayBuffer.linesTop - scrollerLinesTop)
+        scrollerLinesTop = displayBuffer.linesTop
+
+        contentSize = newSize
+        if wasAtLiveEdge {
+            contentOffset = CGPoint (x: 0, y: bottomY)
+        } else {
+            let held = contentOffset.y - CGFloat (trimmed) * cellDimension.height
+            contentOffset = CGPoint (x: 0, y: min (max (0, held), bottomY))
+        }
     }
 
 #if canImport(MetalKit)
