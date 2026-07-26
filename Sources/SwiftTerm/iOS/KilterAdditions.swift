@@ -71,5 +71,31 @@ public extension TerminalView {
                       width: cellDimension.width,
                       height: cellDimension.height)
     }
+
+    /// Attach-time scrollback backfill: parse a raw tmux `capture-pane`
+    /// dump (take it with `-e -J`) and prepend it above the live screen,
+    /// keeping the glass stable — at the live edge the view stays pinned;
+    /// scrolled up, the offset shifts by the insertion so the text under
+    /// the reader's eyes does not move. Returns lines inserted.
+    @discardableResult
+    func kilterBackfillScrollback(rawHistory: [UInt8]) -> Int {
+        let lines = Terminal.kilterParseHistory(raw: rawHistory, cols: terminal.cols)
+        guard !lines.isEmpty else { return 0 }
+        // A selection's absolute rows would all shift; at attach time there
+        // is nothing worth keeping — drop it rather than let it lie.
+        if selection.active { selection.selectNone() }
+        let bottomBefore = max(0, contentSize.height - bounds.height)
+        let wasAtEdge = contentOffset.y >= bottomBefore - cellDimension.height / 2
+        let n = terminal.kilterPrependScrollback(lines)
+        guard n > 0 else { return 0 }
+        updateScroller()
+        if !wasAtEdge {
+            let bottom = max(0, contentSize.height - bounds.height)
+            let held = contentOffset.y + CGFloat(n) * cellDimension.height
+            contentOffset = CGPoint(x: 0, y: min(held, bottom))
+        }
+        setNeedsDisplay(bounds)
+        return n
+    }
 }
 #endif
