@@ -608,13 +608,13 @@ open class Terminal {
         }
         
         /// Returns true if you should send the button release event
-        func sendButtonRelease () -> Bool
+        public func sendButtonRelease () -> Bool
         {
             self != .off
         }
         
         /// Returns true if you should send a motion event when a button is pressed
-        func sendButtonTracking () -> Bool
+        public func sendButtonTracking () -> Bool
         {
             self == .buttonEventTracking || self == .anyEvent
         }
