@@ -20,22 +20,36 @@ public extension TerminalView {
         return (hit.grid.col, hit.grid.row)
     }
 
+    /// The content-absolute buffer position under a view-space point.
+    /// `calculateTapHit` already divides the CONTENT-space y (a scrolled
+    /// UIScrollView's own coordinates include the offset) by the cell
+    /// height, so its row is buffer-absolute — it must feed the
+    /// `bufferPosition` selection APIs, never the screen-relative `row:col:`
+    /// conveniences, which ADD `yDisp` a second time. Invisible while the
+    /// alt screen had no scrollback (yDisp was 0 there); wrong the moment
+    /// it does.
+    private func kilterContentPosition(at point: CGPoint) -> Position {
+        let hit = calculateTapHit(point: point).grid
+        return Position(col: hit.col, row: hit.row)
+    }
+
     /// Begin a character selection at the given view-space point.
     func kilterBeginSelection(at point: CGPoint) {
-        let hit = calculateTapHit(point: point)
-        selection.startSelection(row: hit.grid.row, col: hit.grid.col)
-        selection.selectionMode = .character
+        selection.setSoftStart(bufferPosition: kilterContentPosition(at: point))
+        selection.startSelection()
         setNeedsDisplay(bounds)
     }
 
-    /// Extend the active selection to the given view-space point.
+    /// Extend the active selection to the given view-space point. Anchored
+    /// on `selection.start` directly — the pivot-based extends depend on a
+    /// pivot that is nil'd on every deactivation and never re-seeded.
     func kilterExtendSelection(to point: CGPoint) {
         guard selection.active else {
             kilterBeginSelection(at: point)
             return
         }
-        let hit = calculateTapHit(point: point)
-        selection.pivotExtend(row: hit.grid.row, col: hit.grid.col)
+        selection.setSelection(start: selection.start,
+                               end: kilterContentPosition(at: point))
         setNeedsDisplay(bounds)
     }
 
