@@ -111,6 +111,15 @@ struct GlyphSlotFit {
 extension TerminalView {
     typealias CellDimension = CGSize
 
+    /// kilter-patches: seed options for a freshly constructed view's
+    /// Terminal. The view builds its Terminal during its own `init` (via
+    /// `setup()` → `setupOptions`), so per-instance configuration is
+    /// impossible for options that are only read at construction —
+    /// `altBufferScrollback` builds the alternate screen's buffer exactly
+    /// once, in `Terminal.init`. Set this before the first view is created;
+    /// geometry (cols/rows) is always overridden from the view's size.
+    public static var defaultOptions: TerminalOptions = .default
+
 #if os(macOS)
     /// Controls whether font smoothing (sub-pixel rendering) is enabled during glyph drawing.
     /// Set to `false` to get thinner strokes on Retina displays, matching iTerm2's "Thin strokes" setting.
@@ -179,10 +188,20 @@ extension TerminalView {
         self.cellDimension = computeFontDimensions ()
 
         let zeroSizedView = width == 0 && height == 0
-        let terminalOptions = zeroSizedView
-            ? (terminal?.options ?? .default)
-            : TerminalOptions(cols: Int(width / cellDimension.width),
-                              rows: Int(height / cellDimension.height))
+        // kilter-patches: a resize used to REBUILD the options from cols/rows
+        // alone, silently resetting every other option (termName, scrollback,
+        // cursorStyle, altBufferScrollback…) to the defaults. Preserve the
+        // running terminal's options and override only the geometry. The
+        // first construction happens during the view's own init — before an
+        // app can touch the instance — so `TerminalView.defaultOptions` is
+        // the seed apps set once, up front, for options that must be present
+        // at construction (the alt buffer's scrollback is built exactly once,
+        // in Terminal.init).
+        var terminalOptions = terminal?.options ?? TerminalView.defaultOptions
+        if !zeroSizedView {
+            terminalOptions.cols = Int(width / cellDimension.width)
+            terminalOptions.rows = Int(height / cellDimension.height)
+        }
 
         if terminal == nil {
             terminal = Terminal(delegate: self, options: terminalOptions)
