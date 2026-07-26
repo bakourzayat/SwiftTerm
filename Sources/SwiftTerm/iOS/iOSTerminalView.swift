@@ -986,9 +986,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                     if allowMouseReporting {
                         // TODO: what scenario would have this?
                         scrollDown (lines: deltaRow)
-                    } else {
+                    } else if swipeSendsArrowKeys {
                         let deltaCol = ps.col - hit.col
-                        
+
                         sendKey (deltaCol: deltaCol, deltaRow: deltaRow)
                     }
                 }
@@ -1025,6 +1025,16 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         panMouseGesture = nil
     }
     
+    /// kilter: when the selection pan runs with NO active selection, it
+    /// historically converted the drag into ARROW KEYS sent to the remote,
+    /// with a gray boxed-arrow HUD mid-screen (`sendKey`/`createDirectionView`).
+    /// For a client with its own scrollback and its own arrow keys that is a
+    /// poltergeist: the drag "scrolls" the remote TUI sideways and the HUD
+    /// reads as a mystery overlay (kilter #106 — reported as "a down-arrow
+    /// overlay that blocks the scroll", finally caught on a screenshot
+    /// 2026-07-26). Default true = stock behavior for upstream.
+    public var swipeSendsArrowKeys = true
+
     var panSelectionGesture: UIPanGestureRecognizer?
     func enableSelectionPanGesture () {
         guard panSelectionGesture == nil else {
