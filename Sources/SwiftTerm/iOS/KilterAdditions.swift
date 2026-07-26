@@ -46,5 +46,16 @@ public extension TerminalView {
         for g in kilterNativeSelectionGestures { g.isEnabled = on }
         if on { enableSelectionPanGesture() } else { disableSelectionPanGesture() }
     }
+
+    /// Content-space rect of the active selection's end cell — the anchor
+    /// kilter re-hangs the edit menu on after a local scroll (selection
+    /// rows are content-absolute, so this tracks the text, not the glass).
+    var kilterSelectionEndRect: CGRect? {
+        guard selection.active else { return nil }
+        return CGRect(x: CGFloat(selection.end.col) * cellDimension.width,
+                      y: CGFloat(selection.end.row) * cellDimension.height,
+                      width: cellDimension.width,
+                      height: cellDimension.height)
+    }
 }
 #endif
