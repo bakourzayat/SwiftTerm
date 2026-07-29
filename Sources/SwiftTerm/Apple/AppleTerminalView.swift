@@ -19,6 +19,28 @@ import SwiftUI
 
 let SwiftTermUnderlineStyleKey = NSAttributedString.Key("SwiftTermUnderlineStyle")
 
+/// KILTER — minimum contrast, the terminal-wide readability floor.
+///
+/// A program that paints its own colours has no idea what canvas it landed
+/// on. On a LIGHT theme this is not cosmetic, it is fatal: an Ink app that
+/// has decided the terminal is dark emits `48;2;30;30;30` for its panels and
+/// a near-white foreground, and a light palette's "white" is an ink — so the
+/// owner gets dark text on a dark block and cannot read his own output
+/// (2026-07-29, reproduced on the rig: indexed, 256-colour, truecolour and
+/// reverse-video all collapsed).
+///
+/// No palette can fix truecolour — the program named an RGB triple. The only
+/// place it CAN be fixed is where the pair is finally resolved, which is
+/// `getAttributes` below. This is iTerm2's "minimum contrast" idea: if a
+/// cell's foreground lands too close to its own background, walk the
+/// foreground away until it clears the floor.
+///
+/// 0 disables the rule and restores stock behaviour exactly.
+public enum KilterContrast {
+    /// Minimum perceived-luminance distance between a cell's fg and bg, 0…1.
+    public static var minimum: CGFloat = 0
+}
+
 #if os(iOS) || os(visionOS)
 import UIKit
 typealias TTColor = UIColor
@@ -580,6 +602,11 @@ extension TerminalView {
         if flags.contains (.dim) {
             fgColor = fgColor.dimmedColor (towards: bgColor)
         }
+        // KILTER: the readability floor, applied LAST so it also catches the
+        // dim attribute — faint is meant to be quiet, not invisible. See
+        // `KilterContrast`. Cached with the rest of the attribute, and the
+        // cache is already cleared by `colorsChanged()` on any palette change.
+        fgColor = fgColor.kilterContrasted (against: bgColor, minimum: KilterContrast.minimum)
         var nsattr: [NSAttributedString.Key:Any] = [
             .font: tf,
             .foregroundColor: fgColor,

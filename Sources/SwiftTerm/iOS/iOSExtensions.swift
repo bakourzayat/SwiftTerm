@@ -39,6 +39,42 @@ extension UIColor {
                         alpha: fAlpha)
     }
 
+
+    /// KILTER — guarantee a minimum perceived-luminance distance from
+    /// `background`. See `KilterContrast` for why this exists.
+    ///
+    /// Walks the colour toward white or black — whichever side the background
+    /// leaves room on — until it clears the floor. A dark panel therefore
+    /// gets LIGHTER text and a light page gets DARKER text, which is what a
+    /// reader expects and what a program that guessed wrong failed to do.
+    /// Returns self untouched when the pair is already far enough apart, so
+    /// a palette that was designed properly is never second-guessed.
+    func kilterContrasted (against background: UIColor, minimum: CGFloat) -> UIColor {
+        guard minimum > 0 else { return self }
+        var fR: CGFloat = 0, fG: CGFloat = 0, fB: CGFloat = 0, fA: CGFloat = 1
+        var bR: CGFloat = 0, bG: CGFloat = 0, bB: CGFloat = 0, bA: CGFloat = 1
+        getRed(&fR, green: &fG, blue: &fB, alpha: &fA)
+        background.getRed(&bR, green: &bG, blue: &bB, alpha: &bA)
+        // Rec. 709 luma on the encoded values. Not colour science — a cheap,
+        // stable ordering, which is all a threshold needs.
+        func luma (_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> CGFloat {
+            0.2126 * r + 0.7152 * g + 0.0722 * b
+        }
+        let fl = luma (fR, fG, fB)
+        let bl = luma (bR, bG, bB)
+        guard abs (fl - bl) < minimum else { return self }
+        // Push AWAY from the background, toward whichever extreme is further
+        // from it — so text on a dark block goes white, text on a light page
+        // goes black, and neither ever crosses the background on the way.
+        let target = bl < 0.5 ? min (1, bl + minimum) : max (0, bl - minimum)
+        let extreme: CGFloat = target > fl ? 1 : 0
+        let span = extreme - fl
+        guard abs (span) > 0.0001 else { return self }
+        let t = max (0, min (1, (target - fl) / span))
+        func mix (_ c: CGFloat) -> CGFloat { c + (extreme - c) * t }
+        return UIColor (red: mix (fR), green: mix (fG), blue: mix (fB), alpha: fA)
+    }
+
     static func make (red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat) -> TTColor
     {
         
