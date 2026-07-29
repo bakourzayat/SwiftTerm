@@ -72,6 +72,20 @@ public extension TerminalView {
                       height: cellDimension.height)
     }
 
+    /// How deep the CURRENTLY DISPLAYED buffer actually is, and what it was
+    /// allowed to be. kilter's rig reads this to answer "why does scrollback
+    /// stop?" with a number instead of a theory — `displayBuffer` is internal
+    /// upstream, and the normal and alternate buffers are built at different
+    /// moments, so which one you are looking at matters.
+    var kilterBufferDepth: (lines: Int, capacity: Int, top: Int, isAlt: Bool) {
+        let t = getTerminal()
+        let b = t.displayBuffer
+        return (b.lines.count,
+                t.options.scrollback,
+                b.linesTop,
+                t.isCurrentBufferAlternate)
+    }
+
     /// Attach-time scrollback backfill: parse a raw tmux `capture-pane`
     /// dump (take it with `-e -J`) and prepend it above the live screen,
     /// keeping the glass stable — at the live edge the view stays pinned;
