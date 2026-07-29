@@ -21,13 +21,17 @@ extension CaretView {
         context.setFillColor(TTColor.clear.cgColor)
         context.fill ([bounds])
         
-        if !hasFocus {
-            context.setStrokeColor(bgColor)
-            context.setLineWidth(3)
-            context.stroke(bounds)
-            return
-        }
-        context.setFillColor(bgColor)
+        // KILTER FORK (owner 2026-07-29): "fix the cursor not to be a
+        // rectangle — I want it to be only a regular line."
+        //
+        // Upstream draws a 3pt HOLLOW BOX around the whole cell whenever the
+        // view is not first responder, whatever the cursor style is. In a
+        // multi-pane tmux layout that means every inactive pane shows a
+        // rectangle, which is exactly what he photographed. An unfocused
+        // caret should be the SAME SHAPE as a focused one, just dimmed —
+        // so a bar stays a bar.
+        context.setFillColor(hasFocus ? bgColor
+                             : (bgColor.copy(alpha: 0.45) ?? bgColor))
         let region: CGRect
         switch style {
         case .blinkBar, .steadyBar:
