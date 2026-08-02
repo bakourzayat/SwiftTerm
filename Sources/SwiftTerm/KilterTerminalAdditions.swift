@@ -83,4 +83,28 @@ public extension Terminal {
         buffer.yDisp += taken.count
         return taken.count
     }
+
+    /// Drop everything ABOVE the live screen on the current buffer — the
+    /// reflow-garbage flush (kelter 2026-08-02).
+    ///
+    /// Why it exists: with `altBufferScrollback` on, a RESIZE reflows the
+    /// alt screen and the rows that no longer fit are shed into the local
+    /// scrollback — renderings of a width that no longer exists. Measured
+    /// on a live tmux session: every phone rotation grew the alt buffer by
+    /// a screenful (204 → 220 → 238 lines), stale frames stacking above
+    /// the live one. Scrolled up, they render as overlapping copies of the
+    /// UI at mixed widths — the owner's "ghosting".
+    ///
+    /// The caller drops the garbage and re-backfills the truth from tmux
+    /// (`capture-pane` re-wrapped at the NEW width). Returns lines removed.
+    @discardableResult
+    func kilterDropScrollback() -> Int {
+        let buffer = self.buffer
+        let n = buffer.yBase
+        guard n > 0 else { return 0 }
+        buffer.lines.splice(start: 0, deleteCount: n, items: []) { _ in }
+        buffer.yBase = 0
+        buffer.yDisp = 0
+        return n
+    }
 }

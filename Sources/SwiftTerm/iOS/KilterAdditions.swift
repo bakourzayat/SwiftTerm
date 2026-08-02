@@ -111,5 +111,19 @@ public extension TerminalView {
         setNeedsDisplay(bounds)
         return n
     }
+
+    /// View-level reflow flush — see `Terminal.kilterDropScrollback`. Drops
+    /// the stale lines, kills any selection anchored to rows that no longer
+    /// exist, and pins the view back to the live edge. Returns lines removed.
+    @discardableResult
+    func kilterDropScrollback() -> Int {
+        if selection.active { selection.selectNone() }
+        let n = terminal.kilterDropScrollback()
+        guard n > 0 else { return 0 }
+        updateScroller()
+        contentOffset = CGPoint(x: 0, y: max(0, contentSize.height - bounds.height))
+        setNeedsDisplay(bounds)
+        return n
+    }
 }
 #endif
