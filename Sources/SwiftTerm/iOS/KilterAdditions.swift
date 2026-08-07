@@ -37,6 +37,11 @@ public extension TerminalView {
     func kilterBeginSelection(at point: CGPoint) {
         selection.setSoftStart(bufferPosition: kilterContentPosition(at: point))
         selection.startSelection()
+        // Arm the same drag-to-extend pan a double-tap arms. A selection
+        // that cannot be slid afterwards is not the selection the product
+        // ships — and the rigs that verify handle drags (kelter #33) must
+        // exercise the exact same recognizer the finger meets.
+        enableSelectionPanGesture()
         setNeedsDisplay(bounds)
     }
 
