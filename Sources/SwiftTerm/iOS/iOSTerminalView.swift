@@ -12,7 +12,7 @@
 //
 
 #if os(iOS) || os(visionOS)
-import Foundation\nimport os
+import Foundation
 import UIKit
 import CoreText
 import CoreGraphics
