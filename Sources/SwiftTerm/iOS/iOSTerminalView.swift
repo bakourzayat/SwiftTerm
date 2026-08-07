@@ -943,10 +943,6 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     var panTask: Task<(),Never>?
     
     @objc func panSelectionHandler (_ gestureRecognizer: UIPanGestureRecognizer) {
-        if #available(iOS 14.0, *) {
-            os.Logger(subsystem: "com.bakour.dough", category: "selection")
-                .info("selection pan state=\(gestureRecognizer.state.rawValue) active=\(self.selection.active)")
-        }
         func near (_ pos1: Position, _ pos2: Position) -> Bool {
             return abs (pos1.col-pos2.col) < 3 && abs (pos1.row-pos2.row) < 2
         }
