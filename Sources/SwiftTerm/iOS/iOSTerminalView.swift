@@ -951,19 +951,29 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         case .began:
             let hit = calculateTapHit(gesture: gestureRecognizer).grid
             if selection.active {
-                var extend = false
+                // kelter #33: a drag that started on the selection but not
+                // within near()'s 3-column window fell through with the
+                // pivot still nil — and every later pivotExtend, including
+                // the edge auto-scroll's, was a silent no-op ("nil'd on
+                // every deactivation and never re-seeded", as the note in
+                // KilterAdditions already knew). Seed it ALWAYS: anchor
+                // the farthest end, so the end nearest the finger follows
+                // it — which is what a finger that grabbed roughly-the-
+                // handle meant on a phone-sized cell grid.
                 if near (selection.start, hit) {
                     selection.pivot = selection.end
-                    extend = true
                 } else if near (selection.end, hit) {
                     selection.pivot = selection.start
-                    extend = true
+                } else {
+                    let dStart = abs(hit.row - selection.start.row) * 1000
+                        + abs(hit.col - selection.start.col)
+                    let dEnd = abs(hit.row - selection.end.row) * 1000
+                        + abs(hit.col - selection.end.col)
+                    selection.pivot = dStart <= dEnd ? selection.end : selection.start
                 }
-                if extend {
-                    selection.pivotExtend(bufferPosition: hit)
-                    requestDisplay()
-                    break
-                }
+                selection.pivotExtend(bufferPosition: hit)
+                requestDisplay()
+                break
             }
             panStart = hit
         case .changed:
