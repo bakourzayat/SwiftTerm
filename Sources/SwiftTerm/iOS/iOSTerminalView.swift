@@ -1346,6 +1346,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
     }
     
+    /// kilter 2026-08-10: grabbable selection ends. Stored here because an
+    /// extension cannot hold state; the behaviour lives in
+    /// KilterSelectionHandles.swift.
+    public var kilterHandlesEnabled: Bool = true
+    var kilterHandleAutoScrollTimer: Timer?
+
     var _selectionHandleColor: UIColor = UIColor.systemBlue
     /// The color used to render the selection handles
     public var selectionHandleColor: UIColor {
@@ -1651,6 +1657,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 #endif
 
         lastLayoutBounds = currentBounds
+        kilterUpdateSelectionHandles()
     }
 
     open override var contentOffset: CGPoint {
@@ -2780,7 +2787,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         pendingSelectionChanged = true
         DispatchQueue.main.async {
             self.pendingSelectionChanged = false
-            
+            // kilter: the grabbers follow the selection they belong to.
+            self.kilterUpdateSelectionHandles()
+
             self.inputDelegate?.selectionWillChange (self)
             self.inputDelegate?.selectionDidChange(self)
  
