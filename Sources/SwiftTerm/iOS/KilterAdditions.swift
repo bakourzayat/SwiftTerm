@@ -77,6 +77,28 @@ public extension TerminalView {
                       height: cellDimension.height)
     }
 
+    /// §1.7 — handle-only extension (kelter round 12, owner 2026-08-13:
+    /// *"if you select, you cannot scroll"*). True when a VIEW-space touch
+    /// point lands near either selection edge — the zone a finger means as
+    /// "grab the handle". Everywhere else on the glass a drag means
+    /// SCROLL, selection intact; the selection pan's begin-gate and the
+    /// app's one-finger scroll both consult this so they can never claim
+    /// the same touch. The window mirrors the extend-pan's own `near()`
+    /// tolerance (±3 cols, ±2 rows), padded to a finger's width.
+    func kilterTouchIsNearSelectionEdge(_ point: CGPoint) -> Bool {
+        guard selection.active else { return false }
+        // View → content space (the selection rows are content-absolute).
+        let content = CGPoint(x: point.x, y: point.y + contentOffset.y)
+        let cw = cellDimension.width, ch = cellDimension.height
+        func nearEdge(_ p: Position) -> Bool {
+            let rect = CGRect(x: CGFloat(p.col) * cw, y: CGFloat(p.row) * ch,
+                              width: cw, height: ch)
+                .insetBy(dx: -(cw * 3), dy: -(ch * 2))
+            return rect.contains(content)
+        }
+        return nearEdge(selection.start) || nearEdge(selection.end)
+    }
+
     /// How deep the CURRENTLY DISPLAYED buffer actually is, and what it was
     /// allowed to be. kilter's rig reads this to answer "why does scrollback
     /// stop?" with a number instead of a theory — `displayBuffer` is internal

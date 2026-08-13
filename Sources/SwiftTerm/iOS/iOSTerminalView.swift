@@ -1068,6 +1068,19 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         if gestureRecognizer === panSelectionGesture, gestureRecognizer.numberOfTouches >= 2 {
             return false
         }
+        // §1.7 — HANDLE-ONLY EXTENSION (kelter round 12, owner 2026-08-13:
+        // *"if you select, you cannot scroll"*). With a selection active,
+        // kelter #33's "grab anywhere moves the nearest edge" made EVERY
+        // one-finger drag an extension, which locked scrolling out entirely
+        // until the selection was dismissed. The extend-pan now claims only
+        // touches that start NEAR an edge — the handle zone a finger
+        // actually means. A body drag never begins here, so the app's
+        // scroll owns it and the selection rides along (content-absolute
+        // rows survive local scrolls by design).
+        if gestureRecognizer === panSelectionGesture, selection.active,
+           !kilterTouchIsNearSelectionEdge(gestureRecognizer.location(in: self)) {
+            return false
+        }
         return super.gestureRecognizerShouldBegin(gestureRecognizer)
     }
     
