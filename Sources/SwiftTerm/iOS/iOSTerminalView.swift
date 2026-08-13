@@ -941,6 +941,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     // The start of the pan operation, for the case where we are not sending the input to the client
     var panStart: Position?
     var panTask: Task<(),Never>?
+
+    // §1.8 kilter — content-anchored selection (see KilterAdditions):
+    // WHAT is selected, so repaints can re-find it; the flag keeps the
+    // re-anchorer's own selection writes from re-capturing themselves.
+    var kilterAnchor: KilterSelectionAnchor?
+    var kilterReanchoring = false
     
     @objc func panSelectionHandler (_ gestureRecognizer: UIPanGestureRecognizer) {
         func near (_ pos1: Position, _ pos2: Position) -> Bool {
@@ -2802,6 +2808,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             self.pendingSelectionChanged = false
             // kilter: the grabbers follow the selection they belong to.
             self.kilterUpdateSelectionHandles()
+            // §1.8 kilter: remember WHAT is selected, not where — unless
+            // this change is the re-anchorer's own write.
+            if !self.kilterReanchoring { self.kilterCaptureSelectionAnchor() }
 
             self.inputDelegate?.selectionWillChange (self)
             self.inputDelegate?.selectionDidChange(self)

@@ -10,6 +10,24 @@
 import Foundation
 import CoreGraphics
 
+/// §1.8 — what the user selected, anchored to CONTENT (owner 2026-08-13
+/// night: *"the same behavior as any text on my iPhone — I can scroll
+/// anywhere and come back, and it's still selected"*). On the alternate
+/// screen the remote repaints rows in place, so a cell-anchored selection
+/// either dies (the old clear-on-scroll) or lies (the July wrong-text
+/// bug). This remembers the TEXT with its line context; after repaints
+/// the view re-finds it, hides the highlight while its text is off
+/// screen (dormant, never dead), and restores it when the text returns.
+struct KilterSelectionAnchor {
+    var text: String
+    var startLine: String
+    var startCol: Int
+    var endLine: String
+    var endCol: Int
+    var rowSpan: Int
+    var lastStartRow: Int
+}
+
 public extension TerminalView {
     /// Grid metrics for one character cell (hover beams, overlays).
     var kilterCellSize: CGSize { cellDimension }
@@ -75,6 +93,78 @@ public extension TerminalView {
                       y: CGFloat(selection.end.row) * cellDimension.height,
                       width: cellDimension.width,
                       height: cellDimension.height)
+    }
+
+    /// §1.8 — capture the anchor at every USER selection change (wired in
+    /// `selectionChanged`, guarded against the re-anchorer's own writes).
+    /// A real deactivation — the user dismissing — drops the anchor; the
+    /// dormancy path deactivates with the guard flag up, so its anchor
+    /// survives to resurrect the selection when the text scrolls back.
+    internal func kilterCaptureSelectionAnchor() {
+        let t = getTerminal()
+        guard t.isCurrentBufferAlternate, selection.active else {
+            kilterAnchor = nil
+            return
+        }
+        let s = selection.start, e = selection.end
+        let text = t.getText(start: s, end: e)
+        guard !text.isEmpty else { kilterAnchor = nil; return }
+        kilterAnchor = KilterSelectionAnchor(
+            text: text,
+            startLine: kilterLineText(s.row), startCol: s.col,
+            endLine: kilterLineText(e.row), endCol: e.col,
+            rowSpan: e.row - s.row, lastStartRow: s.row)
+    }
+
+    /// §1.8 — after a repaint, put the highlight back on its TEXT. Fast
+    /// path: unchanged where it stands. Otherwise search the display
+    /// buffer for the anchor's start line (nearest to where it last
+    /// stood), verify the whole span, and move the selection there. Not
+    /// found = the text is off screen: the highlight goes DORMANT (the
+    /// anchor survives) and returns with the text. Called by kelter's
+    /// renderer on the throttled redraw hook.
+    func kilterRevalidateSelection() {
+        let t = getTerminal()
+        guard t.isCurrentBufferAlternate, let anchor = kilterAnchor else { return }
+        kilterReanchoring = true
+        defer { kilterReanchoring = false }
+        if selection.active,
+           t.getText(start: selection.start, end: selection.end) == anchor.text {
+            kilterAnchor?.lastStartRow = selection.start.row
+            return
+        }
+        let rows = t.displayBuffer.lines.count
+        var best: Int?
+        if !anchor.startLine.isEmpty {
+            for row in 0..<rows where kilterLineText(row) == anchor.startLine {
+                let endRow = row + anchor.rowSpan
+                guard endRow < rows, kilterLineText(endRow) == anchor.endLine else { continue }
+                if let b = best,
+                   abs(b - anchor.lastStartRow) <= abs(row - anchor.lastStartRow) { continue }
+                best = row
+            }
+        }
+        if let row = best {
+            let s = Position(col: anchor.startCol, row: row)
+            let e = Position(col: anchor.endCol, row: row + anchor.rowSpan)
+            guard t.getText(start: s, end: e) == anchor.text else {
+                if selection.active { selection.selectNone(); requestDisplay() }
+                return
+            }
+            selection.setSelection(start: s, end: e)
+            kilterAnchor?.lastStartRow = row
+            requestDisplay()
+        } else if selection.active {
+            selection.selectNone()
+            requestDisplay()
+        }
+    }
+
+    /// Full trimmed text of one display-buffer row — the anchor's context.
+    internal func kilterLineText(_ row: Int) -> String {
+        let buffer = getTerminal().displayBuffer
+        guard row >= 0, row < buffer.lines.count else { return "" }
+        return buffer.lines[row].translateToString(trimRight: true)
     }
 
     /// §1.7 — handle-only extension (kelter round 12, owner 2026-08-13:
