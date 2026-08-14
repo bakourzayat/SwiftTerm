@@ -101,19 +101,35 @@ public extension TerminalView {
     /// dormancy path deactivates with the guard flag up, so its anchor
     /// survives to resurrect the selection when the text scrolls back.
     internal func kilterCaptureSelectionAnchor() {
+        // DEACTIVATION NEVER DROPS THE ANCHOR (owner 2026-08-13, "three
+        // steps and it's gone"). Selection-changed notifications arrive
+        // ASYNC, after the re-anchorer's guard flag has already reset —
+        // so the dormancy's own selectNone came back through this hook
+        // reading as a user dismissal and erased the anchor it was meant
+        // to protect. SwiftTerm's internal invalidations did the same.
+        // Only `kilterClearSelectionAnchor()` — the user's explicit
+        // dismissal, called by the app — drops it now.
+        guard selection.active else { return }
         let t = getTerminal()
-        guard t.isCurrentBufferAlternate, selection.active else {
-            kilterAnchor = nil
+        guard t.isCurrentBufferAlternate else {
+            kilterAnchor = nil   // a fresh selection elsewhere replaces it
             return
         }
         let s = selection.start, e = selection.end
         let text = t.getText(start: s, end: e)
-        guard !text.isEmpty else { kilterAnchor = nil; return }
+        guard !text.isEmpty else { return }
         kilterAnchor = KilterSelectionAnchor(
             text: text,
             startLine: kilterLineText(s.row), startCol: s.col,
             endLine: kilterLineText(e.row), endCol: e.col,
             rowSpan: e.row - s.row, lastStartRow: s.row)
+    }
+
+    /// §1.8 — the ONE way the anchor dies: the user dismissed the
+    /// selection on purpose. kelter calls this at its deliberate
+    /// clear sites (the grid tap, entering reading mode).
+    func kilterClearSelectionAnchor() {
+        kilterAnchor = nil
     }
 
     /// §1.8 — after a repaint, put the highlight back on its TEXT. Fast
