@@ -125,6 +125,7 @@ public extension TerminalView {
         case .changed:
             let hit = calculateTapHit(point: point).grid
             selection.pivotExtend(bufferPosition: hit)
+            kilterCaptureSelectionAnchor()   // §1.8: the finger is the truth
             kilterUpdateSelectionHandles()
             requestDisplay()
             // THE PAGE SCROLLS WITH THE FINGER (his ask). Dragging past either

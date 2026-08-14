@@ -540,6 +540,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         if let loc = lastLongSelect {
             selection.selectWordOrExpression(at: Position (col: loc.col, row: loc.row), in: terminal.displayBuffer)
             selection.selectionMode = .character
+            kilterCaptureSelectionAnchor()   // §1.8: user gesture = capture
             enableSelectionPanGesture()
             DispatchQueue.main.async {
                 self.showContextMenu(forRegion:  self.makeContextMenuRegionForSelection(), pos: loc)
@@ -789,6 +790,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             let hit = calculateTapHit(gesture: gestureRecognizer).grid
             selection.selectWordOrExpression(at: hit, in: terminal.displayBuffer)
             selection.selectionMode = .character
+            kilterCaptureSelectionAnchor()   // §1.8: user gesture = capture
             enableSelectionPanGesture()
             showContextMenu (forRegion: makeContextMenuRegionForSelection(), pos: hit)
             queuePendingDisplay()
@@ -988,6 +990,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             if selection.active {
                 stopSelectionTimer()
                 selection.pivotExtend(bufferPosition: hit)
+                kilterCaptureSelectionAnchor()   // §1.8: the finger is the truth
                 gestureRecognizer.setTranslation(CGPoint.zero, in: self)
                 if absoluteY < 0 || absoluteY > bounds.height {
                     startSelectionTimer {
@@ -2808,9 +2811,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             self.pendingSelectionChanged = false
             // kilter: the grabbers follow the selection they belong to.
             self.kilterUpdateSelectionHandles()
-            // §1.8 kilter: remember WHAT is selected, not where — unless
-            // this change is the re-anchorer's own write.
-            if !self.kilterReanchoring { self.kilterCaptureSelectionAnchor() }
+            // §1.8 kilter: the anchor is NOT captured here any more (owner
+            // 2026-08-14, the frozen-highlight walk): this notification
+            // arrives ASYNC, and mid-scroll it read the freshly repainted
+            // text under the OLD cells and overwrote the anchor with it —
+            // the highlight then froze at a screen position while the
+            // words slid underneath. The anchor updates ONLY at the user's
+            // own gesture sites (double-tap, long-press select, drag end,
+            // handle-drag end) — synchronously, while the selected text is
+            // still the text under the highlight.
 
             self.inputDelegate?.selectionWillChange (self)
             self.inputDelegate?.selectionDidChange(self)
