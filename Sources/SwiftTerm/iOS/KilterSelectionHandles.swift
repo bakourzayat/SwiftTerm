@@ -122,6 +122,8 @@ public extension TerminalView {
         switch g.state {
         case .began:
             selection.pivot = handle.isStart ? selection.end : selection.start
+            kilterActiveHandlePan = g
+            kilterActiveHandleIsStart = handle.isStart
         case .changed:
             let hit = calculateTapHit(point: point).grid
             selection.pivotExtend(bufferPosition: hit)
@@ -130,30 +132,74 @@ public extension TerminalView {
             requestDisplay()
             // THE PAGE SCROLLS WITH THE FINGER (his ask). Dragging past either
             // edge of the visible area keeps the selection growing instead of
-            // stopping dead at the boundary.
-            let visibleY = point.y - contentOffset.y
-            if visibleY < cellDimension.height || visibleY > bounds.height - cellDimension.height {
-                kilterStartHandleAutoScroll(up: visibleY < cellDimension.height)
+            // stopping dead at the boundary — the ticker below does the work,
+            // because a finger HELD at the edge emits no more .changed events.
+            if kilterEdgeOvershoot(at: point) != nil {
+                kilterStartHandleAutoScroll()
             } else {
                 kilterStopHandleAutoScroll()
             }
         case .ended, .cancelled, .failed:
             kilterStopHandleAutoScroll()
+            kilterActiveHandlePan = nil
             kilterUpdateSelectionHandles()
         default:
             break
         }
     }
 
-    private func kilterStartHandleAutoScroll(up: Bool) {
+    /// How far past the scroll threshold the finger sits, in GLASS space —
+    /// nil inside the comfortable zone. Distance drives the speed ramp
+    /// (owner 2026-08-14: "as much as we're going up, the speed of the
+    /// scrolling is going up").
+    private func kilterEdgeOvershoot(at point: CGPoint) -> (up: Bool, distance: CGFloat)? {
+        let visibleY = point.y - contentOffset.y
+        let edge = cellDimension.height
+        if visibleY < edge { return (true, edge - visibleY) }
+        if visibleY > bounds.height - edge { return (false, visibleY - (bounds.height - edge)) }
+        return nil
+    }
+
+    /// §1.9 — the edge ticker. Each tick: scroll one-to-four lines (speed ∝
+    /// overshoot) through the embedder's router — LOCAL scrollback where the
+    /// page owns history, WHEEL EVENTS to the remote TUI (herdr) where it
+    /// doesn't, which is what lets a drag reach text that was never on the
+    /// glass. Then re-extend to the finger and recapture the anchor. The
+    /// pivot is refreshed from the CURRENT selection every tick: the
+    /// re-anchorer moves the rows between ticks as repaints land, and a
+    /// stale pivot was exactly the creeping selection of build 82.
+    private func kilterStartHandleAutoScroll() {
         guard kilterHandleAutoScrollTimer == nil else { return }
-        let step = cellDimension.height * 2
-        let t = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+        let t = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                let maxY = max(0, self.contentSize.height - self.bounds.height)
-                let y = min(maxY, max(0, self.contentOffset.y + (up ? -step : step)))
-                self.contentOffset = CGPoint(x: self.contentOffset.x, y: y)
+                guard let g = self.kilterActiveHandlePan,
+                      g.state == .began || g.state == .changed,
+                      self.selection.active else {
+                    self.kilterStopHandleAutoScroll()
+                    return
+                }
+                let point = g.location(in: self)
+                guard let over = self.kilterEdgeOvershoot(at: point) else {
+                    self.kilterStopHandleAutoScroll()
+                    return
+                }
+                let steps = min(4, 1 + Int(over.distance / 30))
+                if let route = self.kilterEdgeScroll {
+                    route(over.up, steps, point)
+                } else {
+                    let maxY = max(0, self.contentSize.height - self.bounds.height)
+                    let dy = self.cellDimension.height * CGFloat(steps)
+                    let y = min(maxY, max(0, self.contentOffset.y + (over.up ? -dy : dy)))
+                    self.contentOffset = CGPoint(x: self.contentOffset.x, y: y)
+                }
+                self.selection.pivot = self.kilterActiveHandleIsStart
+                    ? self.selection.end : self.selection.start
+                let hit = self.calculateTapHit(point: g.location(in: self)).grid
+                self.selection.pivotExtend(bufferPosition: hit)
+                self.kilterCaptureSelectionAnchor()
+                self.kilterUpdateSelectionHandles()
+                self.requestDisplay()
             }
         }
         kilterHandleAutoScrollTimer = t

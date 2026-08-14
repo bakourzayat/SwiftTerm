@@ -33,6 +33,23 @@ struct KilterSelectionAnchor {
     var lastStartRow: Int
 }
 
+/// Right-trim every line of a span. A handle-dragged selection almost
+/// always swallows the gap AFTER a word (the end grabber sits past the
+/// word boundary, iOS-style), so its captured text carries trailing
+/// spaces — while the re-finder reads rows `trimRight`ed. One trailing
+/// space failed the compare and the whole span was declared off screen:
+/// a double-tapped word survived scrolling, a dragged sentence died
+/// (owner walk 2026-08-14). Every anchor comparison goes through this.
+func kilterNormalizedSpan(_ text: String) -> String {
+    text.split(separator: "\n", omittingEmptySubsequences: false)
+        .map { line -> String in
+            var s = line[...]
+            while let last = s.last, last == " " || last == "\t" { s = s.dropLast() }
+            return String(s)
+        }
+        .joined(separator: "\n")
+}
+
 public extension TerminalView {
     /// Grid metrics for one character cell (hover beams, overlays).
     var kilterCellSize: CGSize { cellDimension }
@@ -65,6 +82,7 @@ public extension TerminalView {
         // ships — and the rigs that verify handle drags (kelter #33) must
         // exercise the exact same recognizer the finger meets.
         enableSelectionPanGesture()
+        kilterCaptureSelectionAnchor()   // §1.8: pencil-down is a user gesture
         setNeedsDisplay(bounds)
     }
 
@@ -78,6 +96,7 @@ public extension TerminalView {
         }
         selection.setSelection(start: selection.start,
                                end: kilterContentPosition(at: point))
+        kilterCaptureSelectionAnchor()   // §1.8: pencil drag is a user gesture
         setNeedsDisplay(bounds)
     }
 
@@ -98,6 +117,40 @@ public extension TerminalView {
                       y: CGFloat(selection.end.row) * cellDimension.height,
                       width: cellDimension.width,
                       height: cellDimension.height)
+    }
+
+    /// Content-space bounding rect of the whole active selection — what
+    /// kelter's own verb strip positions itself against. Single row hugs
+    /// the selected cells; a multi-row span is full width, the way iOS
+    /// frames a paragraph selection.
+    var kilterSelectionContentRect: CGRect? {
+        guard selection.active else { return nil }
+        let cw = cellDimension.width, ch = cellDimension.height
+        let s = selection.start, e = selection.end
+        if s.row == e.row {
+            let width = CGFloat(max(1, e.col - s.col + 1)) * cw
+            return CGRect(x: CGFloat(s.col) * cw, y: CGFloat(s.row) * ch,
+                          width: width, height: ch)
+        }
+        return CGRect(x: 0, y: CGFloat(s.row) * ch,
+                      width: CGFloat(terminal.cols) * cw,
+                      height: CGFloat(e.row - s.row + 1) * ch)
+    }
+
+    /// True when a view-space point lands ON the highlighted span itself —
+    /// the owner's tap grammar (2026-08-14): a tap on the selection summons
+    /// its verbs; a tap anywhere else is a dismissal. Uses the same
+    /// `calculateTapHit` mapping every gesture uses, so the two can never
+    /// disagree about what "on it" means.
+    func kilterPointIsInSelection(_ point: CGPoint) -> Bool {
+        guard selection.active else { return false }
+        let hit = calculateTapHit(point: point).grid
+        let s = selection.start, e = selection.end
+        guard hit.row >= s.row, hit.row <= e.row else { return false }
+        if s.row == e.row { return hit.col >= s.col && hit.col <= e.col }
+        if hit.row == s.row { return hit.col >= s.col }
+        if hit.row == e.row { return hit.col <= e.col }
+        return true
     }
 
     /// §1.8 — capture the anchor at every USER selection change (wired in
@@ -121,7 +174,7 @@ public extension TerminalView {
             return
         }
         let s = selection.start, e = selection.end
-        let text = t.getText(start: s, end: e)
+        let text = kilterNormalizedSpan(t.getText(start: s, end: e))
         guard !text.isEmpty else { return }
         let firstSel = text.split(separator: "\n", omittingEmptySubsequences: false)
             .first.map(String.init) ?? text
@@ -153,7 +206,8 @@ public extension TerminalView {
         kilterReanchoring = true
         defer { kilterReanchoring = false }
         if selection.active,
-           t.getText(start: selection.start, end: selection.end) == anchor.text {
+           kilterNormalizedSpan(t.getText(start: selection.start,
+                                          end: selection.end)) == anchor.text {
             kilterAnchor?.lastStartRow = selection.start.row
             return
         }
@@ -177,7 +231,7 @@ public extension TerminalView {
         if let row = best {
             let s = Position(col: anchor.startCol, row: row)
             let e = Position(col: anchor.endCol, row: row + anchor.rowSpan)
-            guard t.getText(start: s, end: e) == anchor.text else {
+            guard kilterNormalizedSpan(t.getText(start: s, end: e)) == anchor.text else {
                 if selection.active { selection.selectNone(); requestDisplay() }
                 return
             }
@@ -215,8 +269,11 @@ public extension TerminalView {
         for sub in subviews where sub is KilterSelectionHandleView {
             if sub.frame.insetBy(dx: -16, dy: -16).contains(point) { return true }
         }
-        // View → content space (the selection rows are content-absolute).
-        let content = CGPoint(x: point.x, y: point.y + contentOffset.y)
+        // `location(in: self)` on a UIScrollView is ALREADY content space
+        // (bounds.origin carries the offset) — adding contentOffset again
+        // was a latent double-shift, invisible on the shallow alt screen
+        // where the offset sits at zero, wrong on a scrolled normal buffer.
+        let content = point
         let cw = cellDimension.width, ch = cellDimension.height
         func nearEdge(_ p: Position) -> Bool {
             let rect = CGRect(x: CGFloat(p.col) * cw, y: CGFloat(p.row) * ch,

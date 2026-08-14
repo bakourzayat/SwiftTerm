@@ -1373,6 +1373,18 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// KilterSelectionHandles.swift.
     public var kilterHandlesEnabled: Bool = true
     var kilterHandleAutoScrollTimer: Timer?
+    /// §1.9 (owner 2026-08-14: "when we reach the top of the screen, it
+    /// does mouse scrolling, and the speed goes up"). The embedder's scroll
+    /// router — the SAME policy a finger-scroll uses (local scrollback when
+    /// the page has history, wheel events to the remote TUI otherwise).
+    /// Called from the handle-drag edge ticker with (up, steps, point);
+    /// nil falls back to plain local contentOffset scrolling.
+    public var kilterEdgeScroll: ((_ up: Bool, _ steps: Int, _ at: CGPoint) -> Void)?
+    /// The live handle drag the edge ticker reads (finger position is
+    /// queried from the recognizer each tick — a stationary finger at the
+    /// edge emits no `.changed` events, but the scroll must keep flowing).
+    weak var kilterActiveHandlePan: UIPanGestureRecognizer?
+    var kilterActiveHandleIsStart = false
 
     var _selectionHandleColor: UIColor = UIColor.systemBlue
     /// The color used to render the selection handles
