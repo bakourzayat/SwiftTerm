@@ -20,9 +20,14 @@ import CoreGraphics
 /// screen (dormant, never dead), and restores it when the text returns.
 struct KilterSelectionAnchor {
     var text: String
-    var startLine: String
+    /// The first LINE of the selected text itself — the search needle.
+    /// NOT the full terminal row: on a multi-pane TUI (herdr) the row
+    /// also contains the rail beside the transcript, which does NOT move
+    /// when the pane scrolls — full-row matching only ever succeeded at
+    /// the original position (owner walk 2026-08-14: "you can see the
+    /// sentence, but you cannot see the marking until you go back").
+    var firstSelLine: String
     var startCol: Int
-    var endLine: String
     var endCol: Int
     var rowSpan: Int
     var lastStartRow: Int
@@ -118,10 +123,13 @@ public extension TerminalView {
         let s = selection.start, e = selection.end
         let text = t.getText(start: s, end: e)
         guard !text.isEmpty else { return }
+        let firstSel = text.split(separator: "\n", omittingEmptySubsequences: false)
+            .first.map(String.init) ?? text
+        guard !firstSel.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         kilterAnchor = KilterSelectionAnchor(
             text: text,
-            startLine: kilterLineText(s.row), startCol: s.col,
-            endLine: kilterLineText(e.row), endCol: e.col,
+            firstSelLine: firstSel,
+            startCol: s.col, endCol: e.col,
             rowSpan: e.row - s.row, lastStartRow: s.row)
     }
 
@@ -149,16 +157,22 @@ public extension TerminalView {
             kilterAnchor?.lastStartRow = selection.start.row
             return
         }
-        let rows = t.displayBuffer.lines.count
+        // Search by the SELECTED TEXT at its own column — vertical pane
+        // scrolls keep columns, and whatever sits beside the pane (a
+        // rail, a border) cannot poison the match the way full-row
+        // equality did. The full-span getText verification below still
+        // gates every candidate.
+        let buffer = t.displayBuffer
+        let rows = buffer.lines.count
         var best: Int?
-        if !anchor.startLine.isEmpty {
-            for row in 0..<rows where kilterLineText(row) == anchor.startLine {
-                let endRow = row + anchor.rowSpan
-                guard endRow < rows, kilterLineText(endRow) == anchor.endLine else { continue }
-                if let b = best,
-                   abs(b - anchor.lastStartRow) <= abs(row - anchor.lastStartRow) { continue }
-                best = row
-            }
+        for row in 0..<rows {
+            guard row + anchor.rowSpan < rows else { break }
+            let tail = buffer.lines[row].translateToString(
+                trimRight: true, startCol: anchor.startCol)
+            guard tail.hasPrefix(anchor.firstSelLine) else { continue }
+            if let b = best,
+               abs(b - anchor.lastStartRow) <= abs(row - anchor.lastStartRow) { continue }
+            best = row
         }
         if let row = best {
             let s = Position(col: anchor.startCol, row: row)
