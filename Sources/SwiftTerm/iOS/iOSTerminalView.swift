@@ -1385,6 +1385,19 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// edge emits no `.changed` events, but the scroll must keep flowing).
     weak var kilterActiveHandlePan: UIPanGestureRecognizer?
     var kilterActiveHandleIsStart = false
+    /// §1.9 round 2 (owner walk of 87: "you go once above the window, it
+    /// goes one tick up, and then it disappears completely"). While an
+    /// edge drag scrolls the remote, the content under the span is MID
+    /// FLIGHT — capturing there poisoned the anchor with half-painted
+    /// text and the re-finder could never find it again. During the drag
+    /// the PIVOT end is pinned to its own line of text (needle below),
+    /// the finger end to the glass, and the anchor is written ONCE, at
+    /// release, when the paint has settled.
+    var kilterEdgeDragActive = false
+    var kilterPivotNeedle = ""
+    var kilterPivotNeedleCol = 0
+    var kilterPivotEdgeCol = 0
+    var kilterPivotLastRow = 0
 
     var _selectionHandleColor: UIColor = UIColor.systemBlue
     /// The color used to render the selection handles

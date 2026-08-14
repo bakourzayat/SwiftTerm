@@ -124,12 +124,21 @@ public extension TerminalView {
             selection.pivot = handle.isStart ? selection.end : selection.start
             kilterActiveHandlePan = g
             kilterActiveHandleIsStart = handle.isStart
+            kilterSeedPivotNeedle(draggingStart: handle.isStart)
         case .changed:
-            let hit = calculateTapHit(point: point).grid
-            selection.pivotExtend(bufferPosition: hit)
-            kilterCaptureSelectionAnchor()   // §1.8: the finger is the truth
-            kilterUpdateSelectionHandles()
-            requestDisplay()
+            // While the edge ticker scrolls the remote, the content under
+            // the span is MID-FLIGHT — the tick owns extension and nothing
+            // captures (§1.9 round 2: a capture here read half-painted
+            // text, poisoned the anchor, and the selection "disappeared
+            // completely" one tick into the scroll). Inside the glass this
+            // is the plain settled path it always was.
+            if !kilterEdgeDragActive {
+                let hit = calculateTapHit(point: point).grid
+                selection.pivotExtend(bufferPosition: hit)
+                kilterCaptureSelectionAnchor()   // §1.8: the finger is the truth
+                kilterUpdateSelectionHandles()
+                requestDisplay()
+            }
             // THE PAGE SCROLLS WITH THE FINGER (his ask). Dragging past either
             // edge of the visible area keeps the selection growing instead of
             // stopping dead at the boundary — the ticker below does the work,
@@ -142,10 +151,103 @@ public extension TerminalView {
         case .ended, .cancelled, .failed:
             kilterStopHandleAutoScroll()
             kilterActiveHandlePan = nil
+            // The paint settles at release — NOW the anchor learns the
+            // final span, once, whole.
+            kilterCaptureSelectionAnchor()
             kilterUpdateSelectionHandles()
+            // Apple's grammar (owner 2026-08-14: "once you release your
+            // finger, it shows you back again"): release = the verbs
+            // re-hang on the selection.
+            if selection.active {
+                showContextMenu(forRegion: makeContextMenuRegionForSelection(),
+                                pos: selection.end)
+            }
         default:
             break
         }
+    }
+
+    /// §1.9 round 2 — pin the PIVOT end to its own line of text for the
+    /// duration of an edge drag: the far end follows its LINE through
+    /// repaints, the near end follows the finger, and the full-span
+    /// anchor is written only at release.
+    func kilterSeedPivotNeedle(draggingStart: Bool) {
+        let t = getTerminal()
+        let s = selection.start, e = selection.end
+        let text = kilterNormalizedSpan(t.getText(start: s, end: e))
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        if draggingStart {
+            // Pivot = selection END: its needle is the span's LAST line,
+            // which starts at col 0 on a multi-row span.
+            kilterPivotNeedle = String(lines.last ?? "")
+            kilterPivotNeedleCol = s.row == e.row ? s.col : 0
+            kilterPivotEdgeCol = e.col
+            kilterPivotLastRow = e.row
+        } else {
+            kilterPivotNeedle = String(lines.first ?? "")
+            kilterPivotNeedleCol = s.col
+            kilterPivotEdgeCol = s.col
+            kilterPivotLastRow = s.row
+        }
+    }
+
+    /// One edge-drag step: re-find the pivot line near where it last
+    /// stood, re-seat the pivot there, extend to the finger. No capture —
+    /// the content is mid-flight until release.
+    func kilterEdgeDragExtend(to point: CGPoint) {
+        guard selection.active else { return }
+        let t = getTerminal()
+        let buffer = t.displayBuffer
+        let rows = buffer.lines.count
+        var best: Int?
+        if !kilterPivotNeedle.isEmpty {
+            for row in 0..<rows {
+                let tail = buffer.lines[row].translateToString(
+                    trimRight: true, startCol: kilterPivotNeedleCol)
+                guard tail.hasPrefix(kilterPivotNeedle) else { continue }
+                if let b = best,
+                   abs(b - kilterPivotLastRow) <= abs(row - kilterPivotLastRow) { continue }
+                best = row
+            }
+        }
+        // Needle off screen (the drag out-ran a full page): hold the last
+        // known row, clamped — the selection reaches the screen edge and
+        // keeps growing on the finger side.
+        let pivotRow = min(max(0, best ?? kilterPivotLastRow), max(0, rows - 1))
+        kilterPivotLastRow = pivotRow
+        kilterReanchoring = true
+        defer { kilterReanchoring = false }
+        selection.pivot = Position(col: kilterPivotEdgeCol, row: pivotRow)
+        selection.pivotExtend(bufferPosition: calculateTapHit(point: point).grid)
+        kilterUpdateSelectionHandles()
+        requestDisplay()
+    }
+
+    // MARK: §1.9 rig hooks — drive the EXACT edge-drag path headlessly
+    // (owner 2026-08-14: "it'll be nice if we can create something that we
+    // can test on" — simctl cannot drag, so the rig calls what the finger
+    // calls).
+
+    public func kilterDebugEdgeDragBegin(draggingStart: Bool) {
+        guard selection.active else { return }
+        selection.pivot = draggingStart ? selection.end : selection.start
+        kilterActiveHandleIsStart = draggingStart
+        kilterSeedPivotNeedle(draggingStart: draggingStart)
+        kilterEdgeDragActive = true
+    }
+
+    public func kilterDebugEdgeDragTick(at point: CGPoint) {
+        guard kilterEdgeDragActive else { return }
+        if let over = kilterEdgeOvershoot(at: point) {
+            let steps = min(4, 1 + Int(over.distance / 30))
+            kilterEdgeScroll?(over.up, steps, point)
+        }
+        kilterEdgeDragExtend(to: point)
+    }
+
+    public func kilterDebugEdgeDragEnd() {
+        kilterEdgeDragActive = false
+        kilterCaptureSelectionAnchor()
     }
 
     /// How far past the scroll threshold the finger sits, in GLASS space —
@@ -164,12 +266,13 @@ public extension TerminalView {
     /// overshoot) through the embedder's router — LOCAL scrollback where the
     /// page owns history, WHEEL EVENTS to the remote TUI (herdr) where it
     /// doesn't, which is what lets a drag reach text that was never on the
-    /// glass. Then re-extend to the finger and recapture the anchor. The
-    /// pivot is refreshed from the CURRENT selection every tick: the
-    /// re-anchorer moves the rows between ticks as repaints land, and a
-    /// stale pivot was exactly the creeping selection of build 82.
+    /// glass — then run one pivot-tracked extend (`kilterEdgeDragExtend`).
+    /// While the ticker is alive, `kilterEdgeDragActive` suspends the
+    /// re-anchorer and NOTHING captures: the content is mid-flight, and
+    /// capturing it poisoned the anchor (owner walk of 87).
     private func kilterStartHandleAutoScroll() {
         guard kilterHandleAutoScrollTimer == nil else { return }
+        kilterEdgeDragActive = true
         let t = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
@@ -193,13 +296,7 @@ public extension TerminalView {
                     let y = min(maxY, max(0, self.contentOffset.y + (over.up ? -dy : dy)))
                     self.contentOffset = CGPoint(x: self.contentOffset.x, y: y)
                 }
-                self.selection.pivot = self.kilterActiveHandleIsStart
-                    ? self.selection.end : self.selection.start
-                let hit = self.calculateTapHit(point: g.location(in: self)).grid
-                self.selection.pivotExtend(bufferPosition: hit)
-                self.kilterCaptureSelectionAnchor()
-                self.kilterUpdateSelectionHandles()
-                self.requestDisplay()
+                self.kilterEdgeDragExtend(to: g.location(in: self))
             }
         }
         kilterHandleAutoScrollTimer = t
@@ -208,6 +305,7 @@ public extension TerminalView {
     private func kilterStopHandleAutoScroll() {
         kilterHandleAutoScrollTimer?.invalidate()
         kilterHandleAutoScrollTimer = nil
+        kilterEdgeDragActive = false
     }
 }
 #endif

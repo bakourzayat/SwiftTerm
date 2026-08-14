@@ -201,6 +201,10 @@ public extension TerminalView {
     /// anchor survives) and returns with the text. Called by kelter's
     /// renderer on the throttled redraw hook.
     func kilterRevalidateSelection() {
+        // §1.9 round 2: while an edge drag scrolls the remote, the pivot
+        // needle (KilterSelectionHandles) owns the selection — re-anchoring
+        // against mid-flight paint here would fight the finger.
+        guard !kilterEdgeDragActive else { return }
         let t = getTerminal()
         guard t.isCurrentBufferAlternate, let anchor = kilterAnchor else { return }
         kilterReanchoring = true
