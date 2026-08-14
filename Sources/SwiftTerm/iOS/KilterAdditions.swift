@@ -207,6 +207,14 @@ public extension TerminalView {
     /// tolerance (±3 cols, ±2 rows), padded to a finger's width.
     func kilterTouchIsNearSelectionEdge(_ point: CGPoint) -> Bool {
         guard selection.active else { return false }
+        // A touch ON a grabber IS a handle grab, wherever the dot floats
+        // (owner 2026-08-14: grabbing a handle also scrolled — the dot
+        // sits just OUTSIDE the text-proximity window, so the scroll
+        // gesture began simultaneously with the handle drag). The handle
+        // views answer first, padded to a fingertip.
+        for sub in subviews where sub is KilterSelectionHandleView {
+            if sub.frame.insetBy(dx: -16, dy: -16).contains(point) { return true }
+        }
         // View → content space (the selection rows are content-absolute).
         let content = CGPoint(x: point.x, y: point.y + contentOffset.y)
         let cw = cellDimension.width, ch = cellDimension.height
