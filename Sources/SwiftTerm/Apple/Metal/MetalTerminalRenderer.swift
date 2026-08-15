@@ -2122,28 +2122,57 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         var glyphVerticesColor: [GlyphVertex] = []
 
         if !hasFocus {
-            let stroke = max(1, 3 * scale)
-            colorVertices.append(contentsOf: quadVertices(x0: CGFloat(x0),
-                                                          y0: CGFloat(y0),
-                                                          x1: CGFloat(x1),
-                                                          y1: CGFloat(y0 + stroke),
-                                                          color: cursorColor))
-            colorVertices.append(contentsOf: quadVertices(x0: CGFloat(x0),
-                                                          y0: CGFloat(y1 - stroke),
-                                                          x1: CGFloat(x1),
-                                                          y1: CGFloat(y1),
-                                                          color: cursorColor))
-            colorVertices.append(contentsOf: quadVertices(x0: CGFloat(x0),
-                                                          y0: CGFloat(y0 + stroke),
-                                                          x1: CGFloat(x0 + stroke),
-                                                          y1: CGFloat(y1 - stroke),
-                                                          color: cursorColor))
-            colorVertices.append(contentsOf: quadVertices(x0: CGFloat(x1 - stroke),
-                                                          y0: CGFloat(y0 + stroke),
-                                                          x1: CGFloat(x1),
-                                                          y1: CGFloat(y1 - stroke),
-                                                          color: cursorColor))
-            return (colorVertices, [], [])
+            // KILTER FORK (owner 2026-08-15 phone walk): upstream drew a
+            // 3px hollow BOX around the whole cell whenever the view is
+            // not first responder, WHATEVER the style — and with the
+            // one-board model the terminal is unfocused most of the time,
+            // so the caret he saw was "a rectangle where we wanted a
+            // straight line". Same law the CoreGraphics caret got on
+            // 2026-07-29: an unfocused caret keeps its SHAPE, just
+            // dimmed. Blocks keep the classic outline.
+            let dimmed = SIMD4<Float>(cursorColor.x, cursorColor.y,
+                                      cursorColor.z, cursorColor.w * 0.45)
+            switch cursorStyle {
+            case .blinkBar, .steadyBar:
+                let barWidth = max(1, 2 * scale)
+                colorVertices.append(contentsOf: quadVertices(x0: CGFloat(x0),
+                                                              y0: CGFloat(y0),
+                                                              x1: CGFloat(x0 + barWidth),
+                                                              y1: CGFloat(y1),
+                                                              color: dimmed))
+                return (colorVertices, [], [])
+            case .blinkUnderline, .steadyUnderline:
+                let underlineHeight = max(1, 2 * scale)
+                colorVertices.append(contentsOf: quadVertices(x0: CGFloat(x0),
+                                                              y0: CGFloat(y0),
+                                                              x1: CGFloat(x1),
+                                                              y1: CGFloat(y0 + underlineHeight),
+                                                              color: dimmed))
+                return (colorVertices, [], [])
+            case .blinkBlock, .steadyBlock:
+                let stroke = max(1, 3 * scale)
+                colorVertices.append(contentsOf: quadVertices(x0: CGFloat(x0),
+                                                              y0: CGFloat(y0),
+                                                              x1: CGFloat(x1),
+                                                              y1: CGFloat(y0 + stroke),
+                                                              color: cursorColor))
+                colorVertices.append(contentsOf: quadVertices(x0: CGFloat(x0),
+                                                              y0: CGFloat(y1 - stroke),
+                                                              x1: CGFloat(x1),
+                                                              y1: CGFloat(y1),
+                                                              color: cursorColor))
+                colorVertices.append(contentsOf: quadVertices(x0: CGFloat(x0),
+                                                              y0: CGFloat(y0 + stroke),
+                                                              x1: CGFloat(x0 + stroke),
+                                                              y1: CGFloat(y1 - stroke),
+                                                              color: cursorColor))
+                colorVertices.append(contentsOf: quadVertices(x0: CGFloat(x1 - stroke),
+                                                              y0: CGFloat(y0 + stroke),
+                                                              x1: CGFloat(x1),
+                                                              y1: CGFloat(y1 - stroke),
+                                                              color: cursorColor))
+                return (colorVertices, [], [])
+            }
         }
 
         switch cursorStyle {
