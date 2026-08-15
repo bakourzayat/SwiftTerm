@@ -3226,8 +3226,24 @@ open class Terminal {
         setCursor(col: 0, row: 0)
     }
 
+    /// kilter: the host app's one-caret law (owner 2026-08-15: "it's a
+    /// rectangle where we wanted a straight line"). When set, every
+    /// cursor-style request — DECSCUSR from the wire included — is
+    /// coerced into the BAR family, preserving the blink bit. Editors
+    /// that switch block/underline to signal modes still blink or
+    /// steady; the shape stays kilter's.
+    public var kilterBarCursorOnly: Bool = false
+
     public func setCursorStyle (_ style: CursorStyle)
     {
+        var style = style
+        if kilterBarCursorOnly {
+            switch style {
+            case .blinkBlock, .blinkUnderline: style = .blinkBar
+            case .steadyBlock, .steadyUnderline: style = .steadyBar
+            default: break
+            }
+        }
         if options.cursorStyle != style {
             tdel?.cursorStyleChanged(source: self, newStyle: style)
             options.cursorStyle = style
