@@ -387,13 +387,23 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             mtkView.framebufferOnly = true
             mtkView.colorPixelFormat = .bgra8Unorm
             mtkView.isUserInteractionEnabled = false
-            // Tag the metal layer with sRGB so the compositor color-manages our
-            // pixels the same way as a regular UIView's layer. Without this,
-            // CAMetalLayer is untagged and raw bytes are treated as
-            // already-in-display-gamut, oversaturating colors on wide-gamut
-            // displays.
+            // Tag the metal layer with EXTENDED sRGB — the colorspace UIKit
+            // itself uses for its layers' backing stores on wide-gamut
+            // panels. Plain sRGB (the previous tag) fixed the untagged-layer
+            // oversaturation, but left the compositor running a DIFFERENT
+            // conversion for this layer than for every UIKit layer around
+            // it: identical pixel values arrived at the panel through two
+            // paths, and in light mode the terminal's container edge read as
+            // a faint dark outline ON THE PANEL while screenshots — which
+            // normalize everything to one space — showed two identical
+            // tones. (kelter owner, 2026-08-17: the line shows in a PHOTO of
+            // the display, never in a screenshot of the same screen; two
+            // independent code audits confirmed the drawn pixels match.)
+            // Extended sRGB shares primaries and transfer with sRGB, so
+            // in-gamut content renders byte-identically — only the
+            // compositor's treatment aligns.
             if let metalLayer = mtkView.layer as? CAMetalLayer {
-                metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+                metalLayer.colorspace = CGColorSpace(name: CGColorSpace.extendedSRGB)
             }
             let renderer = try MetalTerminalRenderer(view: mtkView, terminalView: self)
             mtkView.delegate = renderer
