@@ -162,6 +162,13 @@ struct KittyCacheStamp: Hashable {
 }
 
 struct CacheSignature: Hashable {
+    /// KILTER (2026-08-17): the sub-row scroll offset, in DEVICE PIXELS.
+    /// Row geometry is absolute, so two frames that differ only by a
+    /// fraction of a row are genuinely different pictures and may not
+    /// share cached vertices. Quantised to whole device pixels, so the
+    /// cache is invalidated exactly when the screen actually changes —
+    /// never more often than that.
+    let subRowOffsetPx: Double
     let scale: Double
     let cellWidth: Double
     let cellHeight: Double
@@ -177,6 +184,12 @@ struct CacheSignature: Hashable {
 }
 
 final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
+    /// KILTER (2026-08-17) — how far INTO the first visible row the
+    /// scroll position sits, in points. Subtracted from every row's
+    /// origin so the grid slides smoothly between line boundaries
+    /// instead of snapping. Set once per frame by `buildDrawData`.
+    private var subRowOffset: CGFloat = 0
+
 #if canImport(os)
     private static let profileLog = OSLog(subsystem: "org.tirania.SwiftTerm", category: "MetalProfile")
     private static let profileEnabled = ProcessInfo.processInfo.environment["SWIFTTERM_PROFILE"] == "1"
@@ -575,8 +588,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let yOffset = ceil(lineDescent + lineLeading)
         let viewWidthPx = terminalView.bounds.width * scale
 
-        let rowInfo = visibleRowRange(buffer: buffer, cellHeight: cellHeight, terminalView: terminalView)
-        guard let (firstRow, lastRow, visibleDisp) = rowInfo else {
+        let rowInfo = visibleRowRange(buffer: buffer, cellHeight: cellHeight,
+                                      terminalView: terminalView, scale: scale)
+        guard let (firstRow, lastRow, visibleDisp, subRow) = rowInfo else {
 #if DEBUG
             debugRowsRebuilt = 0
             debugRowsCached = 0
@@ -587,6 +601,10 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                             cursorGlyphVerticesGray: [],
                             cursorGlyphVerticesColor: [])
         }
+        // KILTER: read by `buildRowDrawData` / `buildCursorDrawData`,
+        // which are methods on this renderer — no signature churn across
+        // their five call sites.
+        subRowOffset = subRow
         let bufferingMode = terminalView.metalBufferingMode
         if cacheBufferingMode != bufferingMode {
             if bufferingMode == .perFrameAggregated {
@@ -602,7 +620,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                          placementsCount: kittyState.placementsByKey.count,
                                          nextImageId: kittyState.nextImageId,
                                          nextPlacementId: kittyState.nextPlacementId)
-        let signature = CacheSignature(scale: Double(scale),
+        let signature = CacheSignature(subRowOffsetPx: Double(subRow * scale),
+                                       scale: Double(scale),
                                        cellWidth: Double(cellWidth),
                                        cellHeight: Double(cellHeight),
                                        viewWidth: Double(terminalView.bounds.width),
@@ -784,7 +803,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 
     private func visibleRowRange(buffer: Buffer,
                                  cellHeight: CGFloat,
-                                 terminalView: TerminalView) -> (Int, Int, Int)? {
+                                 terminalView: TerminalView,
+                                 scale: CGFloat) -> (Int, Int, Int, CGFloat)? {
         guard buffer.lines.count > 0 else {
             return nil
         }
@@ -797,19 +817,35 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let maxOffset = max(0, contentHeight - viewHeight)
         let offsetY = min(max(0, terminalView.contentOffset.y), maxOffset)
         let firstRow = max(0, Int(floor(offsetY / cellHeight)))
+        // KILTER (2026-08-17) — THE STEPPED SCROLL, ROOT CAUSE. The
+        // remainder below was discarded: rows are laid out relative to
+        // `firstRow`, so the glass only moved when the offset crossed a
+        // WHOLE line. The app scrolled `contentOffset` in pixels and the
+        // renderer painted it in steps — the owner's *"it feels based on
+        // characters… like steps — one, two, three, four, five — not
+        // actually smooth like a curve."* Quantised to device pixels so
+        // the row cache turns over exactly when the picture does.
+        let deviceScale = max(scale, 1)
+        let rawSubRow = offsetY - CGFloat(firstRow) * cellHeight
+        let subRowOffset = (rawSubRow * deviceScale).rounded() / deviceScale
+        // One row further than before: with a sub-row offset the bottom
+        // row is partially visible and its glyphs must exist, or the
+        // smooth shift would expose a blank strip as it slides up.
         let lastRow = min(buffer.lines.count - 1,
-                          Int(floor((offsetY + viewHeight - 1) / cellHeight)))
+                          Int(floor((offsetY + viewHeight) / cellHeight)))
         if firstRow > lastRow {
             return nil
         }
-        return (firstRow, lastRow, firstRow)
+        return (firstRow, lastRow, firstRow, subRowOffset)
         #else
         let firstRow = buffer.yDisp
         let lastRow = min(buffer.lines.count - 1, buffer.yDisp + buffer.rows - 1)
         if firstRow > lastRow {
             return nil
         }
-        return (firstRow, lastRow, buffer.yDisp)
+        // macOS scrolls by whole lines through yDisp; there is no
+        // sub-row remainder to honour there.
+        return (firstRow, lastRow, buffer.yDisp, 0)
         #endif
     }
 
@@ -854,7 +890,10 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 
         let line = buffer.lines[row]
         let renderMode = line.renderMode
-        let lineOffset = cellHeight * CGFloat(row - yDisp + 1)
+        // KILTER: `- subRowOffset` is the smooth scroll (see
+        // `visibleRowRange`). Zero when the offset sits on a line
+        // boundary, so a still terminal renders byte-identically.
+        let lineOffset = cellHeight * CGFloat(row - yDisp + 1) - subRowOffset
         let lineOrigin = CGPoint(x: 0, y: terminalView.bounds.height - lineOffset)
         let rowBase = lineOrigin.y + cellHeight
         let lineInfo = terminalView.buildAttributedString(row: row, line: line, cols: buffer.cols)
@@ -2094,7 +2133,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         if isBlinkStyle(cursorStyle) && !cursorBlinkOn {
             return ([], [], [])
         }
-        let lineOffset = cellHeight * CGFloat(cursorRow - yDisp + 1)
+        // KILTER: the caret rides the same sub-row shift as its row,
+        // or it would detach from the text during a smooth scroll.
+        let lineOffset = cellHeight * CGFloat(cursorRow - yDisp + 1) - subRowOffset
         let lineOrigin = CGPoint(x: 0, y: terminalView.bounds.height - lineOffset)
         let lineOriginPx = CGPoint(x: lineOrigin.x * scale, y: lineOrigin.y * scale)
         let cellWidthPx = cellWidth * scale
