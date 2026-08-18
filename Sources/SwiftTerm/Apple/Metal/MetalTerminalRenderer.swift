@@ -263,6 +263,15 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private(set) var kilterFramesBuilt = 0
     private(set) var kilterRowsRebuilt = 0
     private(set) var kilterRowsCached = 0
+    // KILTER (2026-08-18) — and WHY a frame rebuilt everything. "The cache
+    // did not help" is not a finding; "the cache was wiped by X" is. One
+    // counter per reason the whole visible range can be rebuilt, so the
+    // next agent starts from a name instead of a hunt.
+    private(set) var kilterWipeSignature = 0   // the picture's identity changed
+    private(set) var kilterWipeAtlas = 0       // a glyph-atlas reset dropped every row
+    private(set) var kilterWipeAnchor = 0      // the anchor left Float's exact reach
+    private(set) var kilterWipeEmpty = 0       // nothing cached was still on the glass
+    private(set) var kilterFullDirty = 0       // the dirty range covered everything visible
 #if DEBUG
     private var imageTextureFailures: Set<ObjectIdentifier> = []
     private var kittyTextureFailures: Set<UInt32> = []
@@ -671,6 +680,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         if signatureChanged {
             rowCache.removeAll()
             cacheSignature = signature
+            kilterWipeSignature &+= 1
         }
 
         let visibleRange = firstRow...lastRow
@@ -683,11 +693,18 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         if !rowCache.isEmpty,
            KilterScrollTransform.needsReanchor(firstRow: firstRow, anchorRow: cacheAnchorRow) {
             rowCache.removeAll()
+            kilterWipeAnchor &+= 1
         }
 
         let dirtyRange = terminalView.metalDirtyRange
         terminalView.metalDirtyRange = nil
         let needsFullRebuild = signatureChanged || rowCache.isEmpty
+        if rowCache.isEmpty && !signatureChanged {
+            kilterWipeEmpty &+= 1
+        }
+        if !needsFullRebuild, let r = intersect(dirtyRange, visibleRange), r == visibleRange {
+            kilterFullDirty &+= 1
+        }
         // THE INVARIANT, enforced in one place: the anchor moves only when
         // there is nothing cached to contradict it. Every row built below
         // is built against this value, and the frame's translation is
@@ -840,6 +857,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         if atlasResetDuringBuild && !atlasResetHandled {
             atlasResetHandled = true
             rowCache.removeAll()
+            kilterWipeAtlas &+= 1
             return buildDrawData(scale: scale)
         }
         atlasResetHandled = false

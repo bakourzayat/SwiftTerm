@@ -332,6 +332,18 @@ public extension TerminalView {
 #endif
     }
 
+    /// RIG ONLY — why the row cache stopped helping, by reason. Cumulative,
+    /// like `kilterMetalRowStats`, and read the same way.
+    var kilterMetalCacheWipes: (signature: Int, atlas: Int, anchor: Int, empty: Int, fullDirty: Int)? {
+#if canImport(MetalKit)
+        guard let r = metalRenderer else { return nil }
+        return (r.kilterWipeSignature, r.kilterWipeAtlas, r.kilterWipeAnchor,
+                r.kilterWipeEmpty, r.kilterFullDirty)
+#else
+        return nil
+#endif
+    }
+
     /// View-level reflow flush — see `Terminal.kilterDropScrollback`. Drops
     /// the stale lines, kills any selection anchored to rows that no longer
     /// exist, and pins the view back to the live edge. Returns lines removed.
