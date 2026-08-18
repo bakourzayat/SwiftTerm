@@ -232,6 +232,17 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private var debugRowsRebuilt = 0
     private var debugRowsCached = 0
 #endif
+    // KILTER (2026-08-18) — the row cache's whole claim is *"a visible
+    // row's GPU vertices are reused until that row's text changes"*, and
+    // until now that claim could only be argued. These three cumulative
+    // counters let a rig sample at both ends of a drag and divide, so
+    // "rows rebuilt per frame" is a number in the log. Always on, not
+    // `#if DEBUG`: three integer adds per FRAME is not a cost, and a
+    // DEBUG-only counter cannot be read from a Release rig run. Read
+    // through `TerminalView.kilterMetalRowStats`.
+    private(set) var kilterFramesBuilt = 0
+    private(set) var kilterRowsRebuilt = 0
+    private(set) var kilterRowsCached = 0
 #if DEBUG
     private var imageTextureFailures: Set<ObjectIdentifier> = []
     private var kittyTextureFailures: Set<UInt32> = []
@@ -786,6 +797,12 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             return buildDrawData(scale: scale)
         }
         atlasResetHandled = false
+        // Counted here and not beside `debugRowsRebuilt` above, so the
+        // atlas-reset retry directly above tallies once (its own pass),
+        // never twice.
+        kilterFramesBuilt &+= 1
+        kilterRowsRebuilt &+= rebuiltRows
+        kilterRowsCached &+= cachedRows
         return result
     }
 
