@@ -9,6 +9,9 @@
 #if os(iOS) || os(visionOS)
 import Foundation
 import CoreGraphics
+#if canImport(MetalKit)
+import MetalKit
+#endif
 
 // §1.8's TYPES AND ITS LAW now live in
 // `Sources/SwiftTerm/Kilter/KilterSelectionAnchorPolicy.swift` —
@@ -331,6 +334,35 @@ public extension TerminalView {
         }
         setNeedsDisplay(bounds)
         return n
+    }
+
+    /// RIG ONLY — how the Metal row cache has actually behaved since this
+    /// view was built: frames drawn, rows rebuilt, rows reused. Cumulative
+    /// on purpose, so a probe samples once at each end of a drag and
+    /// divides; an instantaneous gauge would sample a single frame and
+    /// call it a scroll. `nil` when Metal is not the active renderer —
+    /// the CoreGraphics path has no row cache to report on.
+    var kilterMetalRowStats: (frames: Int, rebuilt: Int, cached: Int)? {
+#if canImport(MetalKit)
+        guard let renderer = metalRenderer else { return nil }
+        return (renderer.kilterFramesBuilt,
+                renderer.kilterRowsRebuilt,
+                renderer.kilterRowsCached)
+#else
+        return nil
+#endif
+    }
+
+    /// RIG ONLY — why the row cache stopped helping, by reason. Cumulative,
+    /// like `kilterMetalRowStats`, and read the same way.
+    var kilterMetalCacheWipes: (signature: Int, atlas: Int, anchor: Int, empty: Int, fullDirty: Int)? {
+#if canImport(MetalKit)
+        guard let r = metalRenderer else { return nil }
+        return (r.kilterWipeSignature, r.kilterWipeAtlas, r.kilterWipeAnchor,
+                r.kilterWipeEmpty, r.kilterFullDirty)
+#else
+        return nil
+#endif
     }
 
     /// View-level reflow flush — see `Terminal.kilterDropScrollback`. Drops

@@ -117,6 +117,21 @@ struct DrawData {
     var cursorColorVertices: [ColorVertex]
     var cursorGlyphVerticesGray: [GlyphVertex]
     var cursorGlyphVerticesColor: [GlyphVertex]
+    /// KILTER (2026-08-18): this frame's whole-picture scroll slide, in
+    /// device pixels, Y-up. Never baked into the vertices — see
+    /// `TerminalUniforms` and `KilterScrollTransform`.
+    var translateYPx: Double = 0
+}
+
+/// KILTER (2026-08-18) — the per-draw uniform block. Layout must match
+/// `struct TerminalUniforms` in `Shaders.metal`: two `float2`s, 16 bytes.
+///
+/// `translate` is the ONLY place a scroll position may live. Rows are
+/// built once against a fixed anchor row and slid here, so a scroll at
+/// constant content changes no vertex and invalidates no cached row.
+struct TerminalUniforms {
+    var viewport: SIMD2<Float>
+    var translate: SIMD2<Float>
 }
 
 struct KittyImageSignature: Hashable {
@@ -161,20 +176,24 @@ struct KittyCacheStamp: Hashable {
     let nextPlacementId: UInt32
 }
 
+/// Everything whose change makes every cached row's vertices wrong.
+///
+/// KILTER (2026-08-18): the SCROLL POSITION is deliberately absent — both
+/// its sub-row remainder (which lived here from 2026-08-17 to 2026-08-18
+/// and cost a full ~45-row rebuild on every frame of a smooth scroll) and
+/// its whole-row part (`yDisp`, which cost one on every row crossed).
+/// Neither is content: rows are built against `cacheAnchorRow` and the
+/// difference rides to the GPU as a per-frame uniform. Every field that
+/// remains describes the PICTURE — geometry, font, buffer shape, images —
+/// and each still earns its place: change any of them and the cached
+/// vertices are lies. Per-row CONTENT change is caught separately and
+/// precisely, by `RowCacheEntry`'s line identity + generation check.
 struct CacheSignature: Hashable {
-    /// KILTER (2026-08-17): the sub-row scroll offset, in DEVICE PIXELS.
-    /// Row geometry is absolute, so two frames that differ only by a
-    /// fraction of a row are genuinely different pictures and may not
-    /// share cached vertices. Quantised to whole device pixels, so the
-    /// cache is invalidated exactly when the screen actually changes —
-    /// never more often than that.
-    let subRowOffsetPx: Double
     let scale: Double
     let cellWidth: Double
     let cellHeight: Double
     let viewWidth: Double
     let viewHeight: Double
-    let yDisp: Int
     let rows: Int
     let cols: Int
     let fontName: String
@@ -184,11 +203,12 @@ struct CacheSignature: Hashable {
 }
 
 final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
-    /// KILTER (2026-08-17) — how far INTO the first visible row the
-    /// scroll position sits, in points. Subtracted from every row's
-    /// origin so the grid slides smoothly between line boundaries
-    /// instead of snapping. Set once per frame by `buildDrawData`.
-    private var subRowOffset: CGFloat = 0
+    /// KILTER (2026-08-18) — the row every cached vertex was built
+    /// against. THE INVARIANT: every entry in `rowCache` was built with
+    /// `yDisp: cacheAnchorRow`, so this may only be written at a moment
+    /// when the cache is empty. `buildDrawData` is the only writer and it
+    /// writes it in exactly that position; nothing else in this file may.
+    private var cacheAnchorRow = 0
 
 #if canImport(os)
     private static let profileLog = OSLog(subsystem: "org.tirania.SwiftTerm", category: "MetalProfile")
@@ -232,6 +252,26 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private var debugRowsRebuilt = 0
     private var debugRowsCached = 0
 #endif
+    // KILTER (2026-08-18) — the row cache's whole claim is *"a visible
+    // row's GPU vertices are reused until that row's text changes"*, and
+    // until now that claim could only be argued. These three cumulative
+    // counters let a rig sample at both ends of a drag and divide, so
+    // "rows rebuilt per frame" is a number in the log. Always on, not
+    // `#if DEBUG`: three integer adds per FRAME is not a cost, and a
+    // DEBUG-only counter cannot be read from a Release rig run. Read
+    // through `TerminalView.kilterMetalRowStats`.
+    private(set) var kilterFramesBuilt = 0
+    private(set) var kilterRowsRebuilt = 0
+    private(set) var kilterRowsCached = 0
+    // KILTER (2026-08-18) — and WHY a frame rebuilt everything. "The cache
+    // did not help" is not a finding; "the cache was wiped by X" is. One
+    // counter per reason the whole visible range can be rebuilt, so the
+    // next agent starts from a name instead of a hunt.
+    private(set) var kilterWipeSignature = 0   // the picture's identity changed
+    private(set) var kilterWipeAtlas = 0       // a glyph-atlas reset dropped every row
+    private(set) var kilterWipeAnchor = 0      // the anchor left Float's exact reach
+    private(set) var kilterWipeEmpty = 0       // nothing cached was still on the glass
+    private(set) var kilterFullDirty = 0       // the dirty range covered everything visible
 #if DEBUG
     private var imageTextureFailures: Set<ObjectIdentifier> = []
     private var kittyTextureFailures: Set<UInt32> = []
@@ -440,10 +480,17 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             }
         }
         bufferPool.beginFrame()
-        let viewport = SIMD2<Float>(Float(view.drawableSize.width), Float(view.drawableSize.height))
+        // KILTER (2026-08-18): the frame's scroll slide travels here, as a
+        // uniform, and NOT inside any vertex — which is what lets the row
+        // cache survive a scroll. `translateYPx` is Y-UP device pixels,
+        // matching the vertex space the shaders read.
+        let uniforms = TerminalUniforms(
+            viewport: SIMD2<Float>(Float(view.drawableSize.width),
+                                   Float(view.drawableSize.height)),
+            translate: SIMD2<Float>(0, Float(drawData.translateYPx)))
 
         if let frame = drawData.frame {
-            drawFrameData(frame, encoder: encoder, viewport: viewport)
+            drawFrameData(frame, encoder: encoder, uniforms: uniforms)
         } else {
             let rows = drawData.rows
             drawVertexBuffers(rows: rows,
@@ -452,12 +499,12 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                               pipeline: cellColorPipeline,
                               texture: nil,
                               encoder: encoder,
-                              viewport: viewport)
+                              uniforms: uniforms)
 
             drawImageRows(rows: rows,
                           imageKey: \.underImageBuffers,
                           encoder: encoder,
-                          viewport: viewport)
+                          uniforms: uniforms)
 
             drawVertexBuffers(rows: rows,
                               bufferKey: \.glyphGrayBuffer,
@@ -465,7 +512,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                               pipeline: cellTextGrayPipeline,
                               texture: grayscaleAtlas.texture,
                               encoder: encoder,
-                              viewport: viewport)
+                              uniforms: uniforms)
 
             drawVertexBuffers(rows: rows,
                               bufferKey: \.glyphColorBuffer,
@@ -473,7 +520,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                               pipeline: cellTextPipeline,
                               texture: colorAtlas.texture,
                               encoder: encoder,
-                              viewport: viewport)
+                              uniforms: uniforms)
 
             drawVertexBuffers(rows: rows,
                               bufferKey: \.decorationBuffer,
@@ -481,28 +528,28 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                               pipeline: cellColorPipeline,
                               texture: nil,
                               encoder: encoder,
-                              viewport: viewport)
+                              uniforms: uniforms)
 
             drawImageRows(rows: rows,
                           imageKey: \.placeholderImageBuffers,
                           encoder: encoder,
-                          viewport: viewport)
+                          uniforms: uniforms)
             drawImageRows(rows: rows,
                           imageKey: \.overImageBuffers,
                           encoder: encoder,
-                          viewport: viewport)
+                          uniforms: uniforms)
             drawImageRows(rows: rows,
                           imageKey: \.otherImageBuffers,
                           encoder: encoder,
-                          viewport: viewport)
+                          uniforms: uniforms)
         }
 
         if !drawData.cursorColorVertices.isEmpty {
             if let buffer = makeBuffer(drawData.cursorColorVertices) {
                 encoder.setRenderPipelineState(colorPipeline)
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-                var viewportVar = viewport
-                encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                var uniformsVar = uniforms
+                encoder.setVertexBytes(&uniformsVar, length: MemoryLayout<TerminalUniforms>.stride, index: 1)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: drawData.cursorColorVertices.count)
             }
         }
@@ -511,8 +558,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             if let buffer = makeBuffer(drawData.cursorGlyphVerticesGray) {
                 encoder.setRenderPipelineState(textGrayPipeline)
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-                var viewportVar = viewport
-                encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                var uniformsVar = uniforms
+                encoder.setVertexBytes(&uniformsVar, length: MemoryLayout<TerminalUniforms>.stride, index: 1)
                 encoder.setFragmentTexture(grayscaleAtlas.texture, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: drawData.cursorGlyphVerticesGray.count)
@@ -523,8 +570,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             if let buffer = makeBuffer(drawData.cursorGlyphVerticesColor) {
                 encoder.setRenderPipelineState(textPipeline)
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-                var viewportVar = viewport
-                encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                var uniformsVar = uniforms
+                encoder.setVertexBytes(&uniformsVar, length: MemoryLayout<TerminalUniforms>.stride, index: 1)
                 encoder.setFragmentTexture(colorAtlas.texture, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: drawData.cursorGlyphVerticesColor.count)
@@ -590,7 +637,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 
         let rowInfo = visibleRowRange(buffer: buffer, cellHeight: cellHeight,
                                       terminalView: terminalView, scale: scale)
-        guard let (firstRow, lastRow, visibleDisp, subRow) = rowInfo else {
+        guard let layout = rowInfo else {
 #if DEBUG
             debugRowsRebuilt = 0
             debugRowsCached = 0
@@ -601,10 +648,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                             cursorGlyphVerticesGray: [],
                             cursorGlyphVerticesColor: [])
         }
-        // KILTER: read by `buildRowDrawData` / `buildCursorDrawData`,
-        // which are methods on this renderer — no signature churn across
-        // their five call sites.
-        subRowOffset = subRow
+        let firstRow = layout.firstRow
+        let lastRow = layout.lastRow
         let bufferingMode = terminalView.metalBufferingMode
         if cacheBufferingMode != bufferingMode {
             if bufferingMode == .perFrameAggregated {
@@ -620,13 +665,11 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                          placementsCount: kittyState.placementsByKey.count,
                                          nextImageId: kittyState.nextImageId,
                                          nextPlacementId: kittyState.nextPlacementId)
-        let signature = CacheSignature(subRowOffsetPx: Double(subRow * scale),
-                                       scale: Double(scale),
+        let signature = CacheSignature(scale: Double(scale),
                                        cellWidth: Double(cellWidth),
                                        cellHeight: Double(cellHeight),
                                        viewWidth: Double(terminalView.bounds.width),
                                        viewHeight: Double(terminalView.bounds.height),
-                                       yDisp: visibleDisp,
                                        rows: buffer.rows,
                                        cols: buffer.cols,
                                        fontName: terminalView.fontSet.normal.fontName,
@@ -637,16 +680,46 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         if signatureChanged {
             rowCache.removeAll()
             cacheSignature = signature
+            kilterWipeSignature &+= 1
         }
 
         let visibleRange = firstRow...lastRow
         if !rowCache.isEmpty {
             rowCache = rowCache.filter { visibleRange.contains($0.key) }
         }
+        // Float vertices stay exact only within reach of the anchor; a very
+        // long scroll eventually walks out of that reach. Wiping and
+        // re-anchoring costs one rebuilt frame per 4096 rows travelled.
+        if !rowCache.isEmpty,
+           KilterScrollTransform.needsReanchor(firstRow: firstRow, anchorRow: cacheAnchorRow) {
+            rowCache.removeAll()
+            kilterWipeAnchor &+= 1
+        }
 
         let dirtyRange = terminalView.metalDirtyRange
         terminalView.metalDirtyRange = nil
         let needsFullRebuild = signatureChanged || rowCache.isEmpty
+        if rowCache.isEmpty && !signatureChanged {
+            kilterWipeEmpty &+= 1
+        }
+        if !needsFullRebuild, let r = intersect(dirtyRange, visibleRange), r == visibleRange {
+            kilterFullDirty &+= 1
+        }
+        // THE INVARIANT, enforced in one place: the anchor moves only when
+        // there is nothing cached to contradict it. Every row built below
+        // is built against this value, and the frame's translation is
+        // re-derived from it so the picture lands where the finger is.
+        var translateYPx = layout.translateYPx
+        if rowCache.isEmpty {
+            cacheAnchorRow = firstRow
+            // Same rule, same inputs, new anchor — never a hand-rolled
+            // second copy of the arithmetic. `firstRow`/`lastRow` do not
+            // depend on the anchor, so only the translation moves.
+            translateYPx = visibleRowRange(buffer: buffer,
+                                           cellHeight: cellHeight,
+                                           terminalView: terminalView,
+                                           scale: scale)?.translateYPx ?? 0
+        }
         let rebuildRange = needsFullRebuild ? visibleRange : intersect(dirtyRange, visibleRange)
 
         var rows: [RowDrawBuffers] = []
@@ -689,7 +762,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             if needsRebuild {
                 rowData = buildRowDrawData(row: row,
                                            buffer: buffer,
-                                           yDisp: visibleDisp,
+                                           yDisp: cacheAnchorRow,
                                            cellWidth: cellWidth,
                                            cellHeight: cellHeight,
                                            yOffset: yOffset,
@@ -704,7 +777,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             } else if let cached = entry {
                 rowData = cached.data ?? buildRowDrawData(row: row,
                                                           buffer: buffer,
-                                                          yDisp: visibleDisp,
+                                                          yDisp: cacheAnchorRow,
                                                           cellWidth: cellWidth,
                                                           cellHeight: cellHeight,
                                                           yOffset: yOffset,
@@ -731,7 +804,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             } else {
                 rowData = buildRowDrawData(row: row,
                                            buffer: buffer,
-                                           yDisp: visibleDisp,
+                                           yDisp: cacheAnchorRow,
                                            cellWidth: cellWidth,
                                            cellHeight: cellHeight,
                                            yOffset: yOffset,
@@ -771,7 +844,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                              cellHeight: cellHeight,
                                              lineDescent: lineDescent,
                                              lineLeading: lineLeading,
-                                             yDisp: visibleDisp,
+                                             yDisp: cacheAnchorRow,
                                              firstRow: firstRow,
                                              lastRow: lastRow)
 
@@ -779,13 +852,21 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                               frame: frameData,
                               cursorColorVertices: cursorData.colorVertices,
                               cursorGlyphVerticesGray: cursorData.glyphVerticesGray,
-                              cursorGlyphVerticesColor: cursorData.glyphVerticesColor)
+                              cursorGlyphVerticesColor: cursorData.glyphVerticesColor,
+                              translateYPx: translateYPx)
         if atlasResetDuringBuild && !atlasResetHandled {
             atlasResetHandled = true
             rowCache.removeAll()
+            kilterWipeAtlas &+= 1
             return buildDrawData(scale: scale)
         }
         atlasResetHandled = false
+        // Counted here and not beside `debugRowsRebuilt` above, so the
+        // atlas-reset retry directly above tallies once (its own pass),
+        // never twice.
+        kilterFramesBuilt &+= 1
+        kilterRowsRebuilt &+= rebuiltRows
+        kilterRowsCached &+= cachedRows
         return result
     }
 
@@ -801,52 +882,39 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         return lower...upper
     }
 
+    /// Where the glass sits in the content, in points — the ONE number a
+    /// scroll changes. iOS scrolls a `UIScrollView` in pixels; macOS
+    /// scrolls by whole lines through `yDisp`. Same quantity either way,
+    /// so one rule can serve both.
+    private func scrollPosition(buffer: Buffer,
+                                cellHeight: CGFloat,
+                                terminalView: TerminalView) -> CGFloat {
+        #if os(iOS) || os(visionOS)
+        return terminalView.contentOffset.y
+        #else
+        return CGFloat(buffer.yDisp) * cellHeight
+        #endif
+    }
+
+    /// The visible rows and this frame's translation. All the arithmetic
+    /// lives in `KilterScrollTransform` so it can be asserted for every
+    /// scroll position instead of the handful a simulator produces.
     private func visibleRowRange(buffer: Buffer,
                                  cellHeight: CGFloat,
                                  terminalView: TerminalView,
-                                 scale: CGFloat) -> (Int, Int, Int, CGFloat)? {
+                                 scale: CGFloat) -> KilterScrollLayout? {
         guard buffer.lines.count > 0 else {
             return nil
         }
-        #if os(iOS) || os(visionOS)
-        let viewHeight = terminalView.bounds.height
-        guard cellHeight > 0, viewHeight > 0 else {
-            return nil
-        }
-        let contentHeight = CGFloat(buffer.lines.count) * cellHeight
-        let maxOffset = max(0, contentHeight - viewHeight)
-        let offsetY = min(max(0, terminalView.contentOffset.y), maxOffset)
-        let firstRow = max(0, Int(floor(offsetY / cellHeight)))
-        // KILTER (2026-08-17) — THE STEPPED SCROLL, ROOT CAUSE. The
-        // remainder below was discarded: rows are laid out relative to
-        // `firstRow`, so the glass only moved when the offset crossed a
-        // WHOLE line. The app scrolled `contentOffset` in pixels and the
-        // renderer painted it in steps — the owner's *"it feels based on
-        // characters… like steps — one, two, three, four, five — not
-        // actually smooth like a curve."* Quantised to device pixels so
-        // the row cache turns over exactly when the picture does.
-        let deviceScale = max(scale, 1)
-        let rawSubRow = offsetY - CGFloat(firstRow) * cellHeight
-        let subRowOffset = (rawSubRow * deviceScale).rounded() / deviceScale
-        // One row further than before: with a sub-row offset the bottom
-        // row is partially visible and its glyphs must exist, or the
-        // smooth shift would expose a blank strip as it slides up.
-        let lastRow = min(buffer.lines.count - 1,
-                          Int(floor((offsetY + viewHeight) / cellHeight)))
-        if firstRow > lastRow {
-            return nil
-        }
-        return (firstRow, lastRow, firstRow, subRowOffset)
-        #else
-        let firstRow = buffer.yDisp
-        let lastRow = min(buffer.lines.count - 1, buffer.yDisp + buffer.rows - 1)
-        if firstRow > lastRow {
-            return nil
-        }
-        // macOS scrolls by whole lines through yDisp; there is no
-        // sub-row remainder to honour there.
-        return (firstRow, lastRow, buffer.yDisp, 0)
-        #endif
+        return KilterScrollTransform.layout(
+            scrollY: Double(scrollPosition(buffer: buffer,
+                                           cellHeight: cellHeight,
+                                           terminalView: terminalView)),
+            viewHeight: Double(terminalView.bounds.height),
+            cellHeight: Double(cellHeight),
+            lineCount: buffer.lines.count,
+            scale: Double(scale),
+            anchorRow: cacheAnchorRow)
     }
 
     private func buildRowDrawData(row: Int,
@@ -890,10 +958,12 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 
         let line = buffer.lines[row]
         let renderMode = line.renderMode
-        // KILTER: `- subRowOffset` is the smooth scroll (see
-        // `visibleRowRange`). Zero when the offset sits on a line
-        // boundary, so a still terminal renders byte-identically.
-        let lineOffset = cellHeight * CGFloat(row - yDisp + 1) - subRowOffset
+        // KILTER (2026-08-18): NO scroll term here. `yDisp` is the cache
+        // ANCHOR, not the live scroll position — the difference between
+        // the two is the frame's uniform translation. That is what lets
+        // these vertices be built once and reused for as long as the row's
+        // text stands still.
+        let lineOffset = cellHeight * CGFloat(row - yDisp + 1)
         let lineOrigin = CGPoint(x: 0, y: terminalView.bounds.height - lineOffset)
         let rowBase = lineOrigin.y + cellHeight
         let lineInfo = terminalView.buildAttributedString(row: row, line: line, cols: buffer.cols)
@@ -1976,14 +2046,14 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                    pipeline: MTLRenderPipelineState,
                                    texture: MTLTexture?,
                                    encoder: MTLRenderCommandEncoder,
-                                   viewport: SIMD2<Float>) {
+                                   uniforms: TerminalUniforms) {
         guard !cells.isEmpty, let buffer = makeBuffer(cells) else {
             return
         }
         encoder.setRenderPipelineState(pipeline)
         encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-        var viewportVar = viewport
-        encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        var uniformsVar = uniforms
+        encoder.setVertexBytes(&uniformsVar, length: MemoryLayout<TerminalUniforms>.stride, index: 1)
         if let texture {
             encoder.setFragmentTexture(texture, index: 0)
             encoder.setFragmentSamplerState(sampler, index: 0)
@@ -1991,46 +2061,46 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: cells.count * 6)
     }
 
-    private func drawFrameData(_ frame: FrameDrawData, encoder: MTLRenderCommandEncoder, viewport: SIMD2<Float>) {
+    private func drawFrameData(_ frame: FrameDrawData, encoder: MTLRenderCommandEncoder, uniforms: TerminalUniforms) {
         drawCellBuffer(frame.backgroundCells,
                        pipeline: cellColorPipeline,
                        texture: nil,
                        encoder: encoder,
-                       viewport: viewport)
+                       uniforms: uniforms)
 
-        drawImageBatches(frame.underImageDraws, encoder: encoder, viewport: viewport)
+        drawImageBatches(frame.underImageDraws, encoder: encoder, uniforms: uniforms)
 
         drawCellBuffer(frame.glyphCellsGray,
                        pipeline: cellTextGrayPipeline,
                        texture: grayscaleAtlas.texture,
                        encoder: encoder,
-                       viewport: viewport)
+                       uniforms: uniforms)
 
         drawCellBuffer(frame.glyphCellsColor,
                        pipeline: cellTextPipeline,
                        texture: colorAtlas.texture,
                        encoder: encoder,
-                       viewport: viewport)
+                       uniforms: uniforms)
 
         drawCellBuffer(frame.decorationCells,
                        pipeline: cellColorPipeline,
                        texture: nil,
                        encoder: encoder,
-                       viewport: viewport)
+                       uniforms: uniforms)
 
-        drawImageBatches(frame.placeholderImageDraws, encoder: encoder, viewport: viewport)
-        drawImageBatches(frame.overImageDraws, encoder: encoder, viewport: viewport)
-        drawImageBatches(frame.otherImageDraws, encoder: encoder, viewport: viewport)
+        drawImageBatches(frame.placeholderImageDraws, encoder: encoder, uniforms: uniforms)
+        drawImageBatches(frame.overImageDraws, encoder: encoder, uniforms: uniforms)
+        drawImageBatches(frame.otherImageDraws, encoder: encoder, uniforms: uniforms)
     }
 
-    private func drawImageBatches(_ draws: [ImageDraw], encoder: MTLRenderCommandEncoder, viewport: SIMD2<Float>) {
+    private func drawImageBatches(_ draws: [ImageDraw], encoder: MTLRenderCommandEncoder, uniforms: TerminalUniforms) {
         guard !draws.isEmpty else {
             return
         }
         encoder.setRenderPipelineState(textPipeline)
         encoder.setFragmentSamplerState(sampler, index: 0)
-        var viewportVar = viewport
-        encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        var uniformsVar = uniforms
+        encoder.setVertexBytes(&uniformsVar, length: MemoryLayout<TerminalUniforms>.stride, index: 1)
         for draw in draws {
             guard let buffer = makeBuffer(draw.vertices) else {
                 continue
@@ -2047,7 +2117,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                    pipeline: MTLRenderPipelineState,
                                    texture: MTLTexture?,
                                    encoder: MTLRenderCommandEncoder,
-                                   viewport: SIMD2<Float>) {
+                                   uniforms: TerminalUniforms) {
         var hasAny = false
         for row in rows {
             if row[keyPath: bufferKey] != nil {
@@ -2059,8 +2129,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             return
         }
         encoder.setRenderPipelineState(pipeline)
-        var viewportVar = viewport
-        encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        var uniformsVar = uniforms
+        encoder.setVertexBytes(&uniformsVar, length: MemoryLayout<TerminalUniforms>.stride, index: 1)
         if let texture {
             encoder.setFragmentTexture(texture, index: 0)
             encoder.setFragmentSamplerState(sampler, index: 0)
@@ -2081,7 +2151,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private func drawImageRows(rows: [RowDrawBuffers],
                                imageKey: KeyPath<RowDrawBuffers, [ImageDrawBuffer]>,
                                encoder: MTLRenderCommandEncoder,
-                               viewport: SIMD2<Float>) {
+                               uniforms: TerminalUniforms) {
         var hasAny = false
         for row in rows {
             if !row[keyPath: imageKey].isEmpty {
@@ -2094,8 +2164,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         }
         encoder.setRenderPipelineState(textPipeline)
         encoder.setFragmentSamplerState(sampler, index: 0)
-        var viewportVar = viewport
-        encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        var uniformsVar = uniforms
+        encoder.setVertexBytes(&uniformsVar, length: MemoryLayout<TerminalUniforms>.stride, index: 1)
         for row in rows {
             for draw in row[keyPath: imageKey] {
                 encoder.setVertexBuffer(draw.buffer, offset: 0, index: 0)
@@ -2133,9 +2203,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         if isBlinkStyle(cursorStyle) && !cursorBlinkOn {
             return ([], [], [])
         }
-        // KILTER: the caret rides the same sub-row shift as its row,
-        // or it would detach from the text during a smooth scroll.
-        let lineOffset = cellHeight * CGFloat(cursorRow - yDisp + 1) - subRowOffset
+        // KILTER: built against the same anchor as its row, and slid by
+        // the same uniform — the caret cannot detach from the text.
+        let lineOffset = cellHeight * CGFloat(cursorRow - yDisp + 1)
         let lineOrigin = CGPoint(x: 0, y: terminalView.bounds.height - lineOffset)
         let lineOriginPx = CGPoint(x: lineOrigin.x * scale, y: lineOrigin.y * scale)
         let cellWidthPx = cellWidth * scale
