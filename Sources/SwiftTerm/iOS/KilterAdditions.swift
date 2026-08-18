@@ -203,9 +203,9 @@ public extension TerminalView {
                                                  end: selection.end))
                 : nil,
             rowCount: buffer.lines.count,
-            rowTail: { row in
+            rowText: { row, startCol in
                 buffer.lines[row].translateToString(
-                    trimRight: true, startCol: anchor.startCol)
+                    trimRight: true, startCol: startCol)
             },
             spanText: { row in
                 kilterNormalizedSpan(t.getText(
@@ -219,6 +219,27 @@ public extension TerminalView {
             selection.setSelection(
                 start: Position(col: anchor.startCol, row: row),
                 end: Position(col: anchor.endCol, row: row + anchor.rowSpan))
+            kilterAnchor?.lastStartRow = row
+            requestDisplay()
+        case .partial(let row, let lines):
+            // HALF ON THE GLASS keeps its visible half highlighted (owner
+            // 2026-08-18). The clipped end sits at the end of the last
+            // line that is actually there; only a run that still reaches
+            // the span's own first/last line keeps that line's column.
+            let anchorLines = anchor.text
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map(String.init)
+            let startCol = lines.lowerBound == 0 ? anchor.startCol : 0
+            let endCol: Int
+            if lines.upperBound == anchor.rowSpan {
+                endCol = anchor.endCol
+            } else {
+                let base = lines.upperBound == 0 ? anchor.startCol : 0
+                endCol = max(base, base + anchorLines[lines.upperBound].count - 1)
+            }
+            selection.setSelection(
+                start: Position(col: startCol, row: row + lines.lowerBound),
+                end: Position(col: endCol, row: row + lines.upperBound))
             kilterAnchor?.lastStartRow = row
             requestDisplay()
         case .dormant:

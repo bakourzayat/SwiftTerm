@@ -123,10 +123,23 @@ public enum KilterAnchorVerdict: Equatable, Sendable {
 public enum KilterAnchorLanding: Equatable, Sendable {
     /// Already sitting on its own text — nothing to do (the fast path).
     case hold
-    /// Found, and the WHOLE span verified: move the selection here.
+    /// Found whole, and verified: move the selection here.
     case move(startRow: Int)
-    /// Not on the glass, or found but unverifiable. The highlight goes
-    /// away; **the anchor does not.** It comes back with its text.
+    /// **HALF ON THE GLASS** (owner, 2026-08-18, build 121: *"if you
+    /// scroll away from it — like three or four lines above it — it will
+    /// disappear, even though a tiny bit of it should be shown. Until you
+    /// go back to the same frame you were in before, then it's visible
+    /// again."*)
+    ///
+    /// Only anchor lines `lines` are still on the glass. `startRow` is
+    /// where line 0 WOULD sit, so the rows actually present are
+    /// `startRow + lines.lowerBound ... startRow + lines.upperBound` —
+    /// and `startRow` may be negative when the span's head is the half
+    /// that scrolled away. Highlight what is there; the anchor keeps the
+    /// whole span, so the rest comes back with it.
+    case partial(startRow: Int, lines: ClosedRange<Int>)
+    /// Not on the glass at all. The highlight goes away; **the anchor
+    /// does not.** It comes back with its text.
     case dormant
 }
 
@@ -161,45 +174,112 @@ public enum KilterAnchorPolicy {
     /// Pure by construction — the two closures are the only contact with
     /// the terminal, so every branch is reachable from a test.
     ///
+    /// LINE BY LINE, NOT ALL-OR-NOTHING (owner, 2026-08-18). This used to
+    /// verify the whole span with one `getText` compare and return
+    /// `dormant` on any mismatch — so a sentence straddling the edge of
+    /// what the terminal still holds lost its VISIBLE half too, and only
+    /// came back when the original frame did. Each anchor line is now
+    /// matched against its own row at its own column, and the highlight
+    /// covers the longest contiguous run that is genuinely there. The
+    /// full-span verification is kept for the whole-span case, because
+    /// that is the July wrong-text lock.
+    ///
     /// - Parameters:
     ///   - anchor: the span to find.
     ///   - activeSpan: the text under the CURRENT selection, or nil when
-    ///     no selection is active. Normalized by the caller's read.
+    ///     no selection is active.
     ///   - rowCount: rows in the display buffer.
-    ///   - rowTail: row → that row's text from `anchor.startCol`
+    ///   - rowText: (row, startCol) → that row's text from `startCol`
     ///     rightward, right-trimmed. Searching by the SELECTED TEXT at
     ///     its own column (not the full row) is what makes this survive
     ///     herdr's static rail — the thing beside the pane does not move
-    ///     when the pane scrolls, and full-row equality only ever
-    ///     matched at the original position.
+    ///     when the pane scrolls, and full-row equality only ever matched
+    ///     at the original position.
     ///   - spanText: candidate start row → the full normalized span that
-    ///     would be selected there. The verification gate: a candidate
-    ///     that does not reproduce the anchor's text EXACTLY is refused,
-    ///     which is why the July wrong-text bug cannot recur.
+    ///     would be selected there. The verification gate for a whole
+    ///     span: a candidate that does not reproduce the anchor's text
+    ///     EXACTLY is refused, which is why the July wrong-text bug
+    ///     cannot recur.
     public static func locate(
         anchor: KilterSelectionAnchor,
         activeSpan: String?,
         rowCount: Int,
-        rowTail: (Int) -> String,
-        spanText: (Int) -> String
+        rowText: (_ row: Int, _ startCol: Int) -> String,
+        spanText: (_ startRow: Int) -> String
     ) -> KilterAnchorLanding {
         // Fast path: the highlight is already on its words.
         if let activeSpan, activeSpan == anchor.text { return .hold }
-        var best: Int?
-        var row = 0
-        while row + anchor.rowSpan < rowCount {
-            defer { row += 1 }
-            guard rowTail(row).hasPrefix(anchor.firstSelLine) else { continue }
-            // Nearest to where it last stood wins — a transcript repeats
-            // itself, and the honest tiebreak is "the one closest to
-            // where the reader's eyes were". Documented heuristic, not a
-            // guarantee (build 82's stated limit).
-            if let b = best,
-               abs(b - anchor.lastStartRow) <= abs(row - anchor.lastStartRow) { continue }
-            best = row
+        guard rowCount > 0 else { return .dormant }
+
+        let lines = anchor.text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        let lastLine = anchor.rowSpan
+        guard lines.count == lastLine + 1 else { return .dormant }
+
+        /// Which column anchor line `i` begins at: the first line starts
+        /// where the user's selection started, every later line at the
+        /// left edge of the row.
+        func column(_ i: Int) -> Int { i == 0 ? anchor.startCol : 0 }
+
+        func matches(line i: Int, atRow row: Int) -> Bool {
+            guard row >= 0, row < rowCount else { return false }
+            // A BLANK LINE INSIDE THE SPAN IS STILL PART OF IT. A selected
+            // paragraph routinely contains empty rows (any transcript
+            // does), and `hasPrefix("")` is true of everything — so an
+            // empty anchor line must match an empty ROW, exactly, or the
+            // run would stop dead at the first blank and clip a paragraph
+            // the user can plainly see whole.
+            if lines[i].isEmpty { return rowText(row, column(i)).isEmpty }
+            return rowText(row, column(i)).hasPrefix(lines[i])
         }
-        guard let found = best else { return .dormant }
-        guard spanText(found) == anchor.text else { return .dormant }
-        return .move(startRow: found)
+
+        /// A blank line is not a needle — every blank row matches it, so
+        /// it can never tell us WHERE the span sits. Only a line with
+        /// content may seed the search; blanks are picked up afterwards,
+        /// when the run grows outward from a line that is distinctive.
+        func canSeed(_ i: Int) -> Bool { !lines[i].isEmpty }
+
+        // Find where line 0 WOULD sit. Try the anchor's own first line
+        // first — the original needle, and the common case. If the span's
+        // head is the half that scrolled away, fall back to the first
+        // later line that is still on the glass and work backwards.
+        var startRow: Int?
+        var seedLine = 0
+        for i in 0...lastLine {
+            guard canSeed(i) else { continue }
+            var best: Int?
+            var row = 0
+            while row < rowCount {
+                defer { row += 1 }
+                guard matches(line: i, atRow: row) else { continue }
+                // Nearest to where it last stood wins — a transcript
+                // repeats itself, and the honest tiebreak is "the one
+                // closest to where the reader's eyes were". Documented
+                // heuristic, not a guarantee.
+                let candidate = row - i
+                if let b = best,
+                   abs(b - anchor.lastStartRow) <= abs(candidate - anchor.lastStartRow) { continue }
+                best = candidate
+            }
+            if let best {
+                startRow = best
+                seedLine = i
+                break
+            }
+        }
+        guard let startRow else { return .dormant }
+
+        // Grow the run outward from the line we actually found.
+        var lower = seedLine, upper = seedLine
+        while lower > 0, matches(line: lower - 1, atRow: startRow + lower - 1) { lower -= 1 }
+        while upper < lastLine, matches(line: upper + 1, atRow: startRow + upper + 1) { upper += 1 }
+
+        if lower == 0 && upper == lastLine {
+            // The whole span is here — the July lock still gates it.
+            guard spanText(startRow) == anchor.text else { return .dormant }
+            return .move(startRow: startRow)
+        }
+        return .partial(startRow: startRow, lines: lower...upper)
     }
 }
+
