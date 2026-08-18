@@ -10,45 +10,12 @@
 import Foundation
 import CoreGraphics
 
-/// §1.8 — what the user selected, anchored to CONTENT (owner 2026-08-13
-/// night: *"the same behavior as any text on my iPhone — I can scroll
-/// anywhere and come back, and it's still selected"*). On the alternate
-/// screen the remote repaints rows in place, so a cell-anchored selection
-/// either dies (the old clear-on-scroll) or lies (the July wrong-text
-/// bug). This remembers the TEXT with its line context; after repaints
-/// the view re-finds it, hides the highlight while its text is off
-/// screen (dormant, never dead), and restores it when the text returns.
-struct KilterSelectionAnchor {
-    var text: String
-    /// The first LINE of the selected text itself — the search needle.
-    /// NOT the full terminal row: on a multi-pane TUI (herdr) the row
-    /// also contains the rail beside the transcript, which does NOT move
-    /// when the pane scrolls — full-row matching only ever succeeded at
-    /// the original position (owner walk 2026-08-14: "you can see the
-    /// sentence, but you cannot see the marking until you go back").
-    var firstSelLine: String
-    var startCol: Int
-    var endCol: Int
-    var rowSpan: Int
-    var lastStartRow: Int
-}
-
-/// Right-trim every line of a span. A handle-dragged selection almost
-/// always swallows the gap AFTER a word (the end grabber sits past the
-/// word boundary, iOS-style), so its captured text carries trailing
-/// spaces — while the re-finder reads rows `trimRight`ed. One trailing
-/// space failed the compare and the whole span was declared off screen:
-/// a double-tapped word survived scrolling, a dragged sentence died
-/// (owner walk 2026-08-14). Every anchor comparison goes through this.
-func kilterNormalizedSpan(_ text: String) -> String {
-    text.split(separator: "\n", omittingEmptySubsequences: false)
-        .map { line -> String in
-            var s = line[...]
-            while let last = s.last, last == " " || last == "\t" { s = s.dropLast() }
-            return String(s)
-        }
-        .joined(separator: "\n")
-}
+// §1.8's TYPES AND ITS LAW now live in
+// `Sources/SwiftTerm/Kilter/KilterSelectionAnchorPolicy.swift` —
+// platform-free and pure, so kelter's `swift test` suite can assert the
+// owner's words against them (that file explains why). What stays here
+// is the UIKit half: reading the buffer, moving the selection, asking
+// the renderer to paint. Every JUDGEMENT below is the policy's.
 
 public extension TerminalView {
     /// Grid metrics for one character cell (hover beams, overlays).
@@ -164,14 +131,27 @@ public extension TerminalView {
         // ASYNC, after the re-anchorer's guard flag has already reset —
         // so the dormancy's own selectNone came back through this hook
         // reading as a user dismissal and erased the anchor it was meant
-        // to protect. SwiftTerm's internal invalidations did the same.
-        // Only `kilterClearSelectionAnchor()` — the user's explicit
-        // dismissal, called by the app — drops it now.
-        guard selection.active else { return }
-        let t = getTerminal()
-        guard t.isCurrentBufferAlternate else {
-            kilterAnchor = nil   // a fresh selection elsewhere replaces it
+        // to protect. The law is `KilterAnchorPolicy.verdict(for:)` now:
+        // `.selectionDeactivated` is `.keep`, and there is exactly one
+        // way to reach `.drop`.
+        guard selection.active else {
+            _ = KilterAnchorPolicy.verdict(for: .selectionDeactivated)  // .keep
             return
+        }
+        let t = getTerminal()
+        let onAlt = t.isCurrentBufferAlternate
+        switch KilterAnchorPolicy.verdict(
+            for: .userGestureChangedSelection(onAlternateBuffer: onAlt)) {
+        case .keep:
+            return
+        case .drop:
+            // Normal buffer: rows are content-absolute and survive a
+            // scroll by construction, so a fresh selection here replaces
+            // the anchor with nothing rather than leaving a stale one.
+            kilterAnchor = nil
+            return
+        case .recapture:
+            break
         }
         let s = selection.start, e = selection.end
         let text = kilterNormalizedSpan(t.getText(start: s, end: e))
@@ -190,6 +170,12 @@ public extension TerminalView {
     /// selection on purpose. kelter calls this at its deliberate
     /// clear sites (the grid tap, entering reading mode).
     func kilterClearSelectionAnchor() {
+        // The app's two deliberate sites (the grid tap on a still glass,
+        // entering reading mode) are the only callers, and both map to a
+        // policy verdict of `.drop`. Asserted here so a third caller with
+        // a different meaning cannot quietly join them.
+        guard KilterAnchorPolicy.verdict(for: .userDismissedDeliberately) == .drop
+        else { return }
         kilterAnchor = nil
     }
 
@@ -209,42 +195,40 @@ public extension TerminalView {
         guard t.isCurrentBufferAlternate, let anchor = kilterAnchor else { return }
         kilterReanchoring = true
         defer { kilterReanchoring = false }
-        if selection.active,
-           kilterNormalizedSpan(t.getText(start: selection.start,
-                                          end: selection.end)) == anchor.text {
-            kilterAnchor?.lastStartRow = selection.start.row
-            return
-        }
-        // Search by the SELECTED TEXT at its own column — vertical pane
-        // scrolls keep columns, and whatever sits beside the pane (a
-        // rail, a border) cannot poison the match the way full-row
-        // equality did. The full-span getText verification below still
-        // gates every candidate.
         let buffer = t.displayBuffer
-        let rows = buffer.lines.count
-        var best: Int?
-        for row in 0..<rows {
-            guard row + anchor.rowSpan < rows else { break }
-            let tail = buffer.lines[row].translateToString(
-                trimRight: true, startCol: anchor.startCol)
-            guard tail.hasPrefix(anchor.firstSelLine) else { continue }
-            if let b = best,
-               abs(b - anchor.lastStartRow) <= abs(row - anchor.lastStartRow) { continue }
-            best = row
-        }
-        if let row = best {
-            let s = Position(col: anchor.startCol, row: row)
-            let e = Position(col: anchor.endCol, row: row + anchor.rowSpan)
-            guard kilterNormalizedSpan(t.getText(start: s, end: e)) == anchor.text else {
-                if selection.active { selection.selectNone(); requestDisplay() }
-                return
-            }
-            selection.setSelection(start: s, end: e)
+        let landing = KilterAnchorPolicy.locate(
+            anchor: anchor,
+            activeSpan: selection.active
+                ? kilterNormalizedSpan(t.getText(start: selection.start,
+                                                 end: selection.end))
+                : nil,
+            rowCount: buffer.lines.count,
+            rowTail: { row in
+                buffer.lines[row].translateToString(
+                    trimRight: true, startCol: anchor.startCol)
+            },
+            spanText: { row in
+                kilterNormalizedSpan(t.getText(
+                    start: Position(col: anchor.startCol, row: row),
+                    end: Position(col: anchor.endCol, row: row + anchor.rowSpan)))
+            })
+        switch landing {
+        case .hold:
+            kilterAnchor?.lastStartRow = selection.start.row
+        case .move(let row):
+            selection.setSelection(
+                start: Position(col: anchor.startCol, row: row),
+                end: Position(col: anchor.endCol, row: row + anchor.rowSpan))
             kilterAnchor?.lastStartRow = row
             requestDisplay()
-        } else if selection.active {
-            selection.selectNone()
-            requestDisplay()
+        case .dormant:
+            // The highlight goes away; the ANCHOR DOES NOT. This is the
+            // whole of the owner's law — the words are off the glass, not
+            // deselected, and they stand back up when they return.
+            if selection.active {
+                selection.selectNone()
+                requestDisplay()
+            }
         }
     }
 

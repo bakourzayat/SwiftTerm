@@ -1,0 +1,205 @@
+//
+// KilterSelectionAnchorPolicy.swift — §1.8's law, as a pure rule.
+//
+// THE OWNER'S LAW (2026-08-13 night, dictated): *"the same behavior as
+// any text on my iPhone — scroll anywhere, come back, still selected,
+// extend whenever."*
+//
+// WHY THIS FILE EXISTS (2026-08-18). That law has been broken and
+// re-fixed four times — builds 82, 83, 84, 86 — and every fix lived
+// inside a UIKit extension that no test could reach. The owner's
+// complaint this round was not the bug, it was the RECURRENCE: *"it was
+// diagnosed and fixed before and it has come back."* A rule that only
+// exists as guard clauses scattered through gesture handlers has no way
+// to fail loudly, so it fails quietly instead, one renderer swap or one
+// scroll rewrite at a time.
+//
+// So the decision is extracted here: pure, `Sendable`, no UIKit, and
+// deliberately WITHOUT the `#if os(iOS)` guard the rest of kilter's
+// additions carry — this file compiles on macOS, which is what lets
+// kelter's `swift test` suite assert the owner's words directly
+// (`Tests/Unit/SelectionAnchorPolicyTests.swift`).
+//
+// The UIKit side (`KilterAdditions.swift`) keeps the buffer reads and
+// the repaint calls; every JUDGEMENT it used to make inline it now asks
+// this file for.
+//
+import Foundation
+
+/// §1.8 — what the user selected, anchored to CONTENT rather than to a
+/// screen cell. On the alternate screen the remote repaints rows in
+/// place, so a cell-anchored selection either dies (the pre-82
+/// clear-on-scroll) or lies (the July wrong-text bug). This remembers
+/// the TEXT with its line context so the view can re-find it after any
+/// repaint.
+public struct KilterSelectionAnchor: Equatable, Sendable {
+    /// The full selected span, normalized (see `kilterNormalizedSpan`).
+    public var text: String
+    /// The first LINE of the selected text itself — the search needle.
+    /// NOT the full terminal row: on a multi-pane TUI (herdr) the row
+    /// also carries the rail beside the transcript, which does NOT move
+    /// when the pane scrolls, so full-row matching only ever succeeded
+    /// at the original position (owner walk 2026-08-14: *"you can see
+    /// the sentence, but you cannot see the marking until you go
+    /// back"*).
+    public var firstSelLine: String
+    public var startCol: Int
+    public var endCol: Int
+    public var rowSpan: Int
+    /// Where the span last stood — the tiebreak when the needle matches
+    /// more than one row (a repetitive transcript). Nearest wins.
+    public var lastStartRow: Int
+
+    public init(text: String, firstSelLine: String, startCol: Int,
+                endCol: Int, rowSpan: Int, lastStartRow: Int) {
+        self.text = text
+        self.firstSelLine = firstSelLine
+        self.startCol = startCol
+        self.endCol = endCol
+        self.rowSpan = rowSpan
+        self.lastStartRow = lastStartRow
+    }
+}
+
+/// Right-trim every line of a span. A handle-dragged selection almost
+/// always swallows the gap AFTER a word (the end grabber sits past the
+/// word boundary, iOS-style), so its captured text carries trailing
+/// spaces — while the re-finder reads rows `trimRight`ed. One trailing
+/// space failed the compare and the whole span was declared off screen:
+/// a double-tapped word survived scrolling, a dragged sentence died
+/// (owner walk 2026-08-14, build 87). Every anchor comparison goes
+/// through this, on BOTH sides.
+public func kilterNormalizedSpan(_ text: String) -> String {
+    text.split(separator: "\n", omittingEmptySubsequences: false)
+        .map { line -> String in
+            var s = line[...]
+            while let last = s.last, last == " " || last == "\t" { s = s.dropLast() }
+            return String(s)
+        }
+        .joined(separator: "\n")
+}
+
+/// Everything that has ever ASKED to change the anchor. Naming them is
+/// the point: before this enum the same question was answered inline at
+/// ten call sites in four files, in four different idioms, and each
+/// re-fix only taught one of them.
+public enum KilterAnchorEvent: Equatable, Sendable {
+    /// The selection went inactive. Build 83's bug in one line: this
+    /// arrives ASYNC, after the re-anchorer's guard flag has reset, so
+    /// the dormancy's OWN `selectNone` came back looking like a user
+    /// dismissal and erased the anchor it existed to protect.
+    case selectionDeactivated
+    /// The re-anchorer moved the highlight to its text. Not news.
+    case reanchorerMovedIt
+    /// A user gesture changed the selection — double-tap, long-press
+    /// Select, drag-extend, handle drag, pencil. Synchronous, while the
+    /// selected text is still the text under the highlight (build 86:
+    /// capturing from the async notification instead froze the
+    /// highlight at a screen position while the words slid underneath).
+    case userGestureChangedSelection(onAlternateBuffer: Bool)
+    /// The user dismissed it on purpose — the grid tap, on a still
+    /// glass (build 84: a scroll flick's trailing touch lands as a tap,
+    /// and dismissing on THAT threw selections away mid-read).
+    case userDismissedDeliberately
+    /// Reading mode took the glass; the grid's selection stands down.
+    case readingModeEntered
+    /// The host repainted under the highlight. Never news either — the
+    /// whole point of anchoring to content is that a repaint is not a
+    /// dismissal.
+    case hostRepaint
+}
+
+/// What may happen to the anchor.
+public enum KilterAnchorVerdict: Equatable, Sendable {
+    /// The anchor lives, untouched. The DEFAULT, and the owner's law.
+    case keep
+    /// The anchor dies. Only a deliberate human dismissal earns this.
+    case drop
+    /// Re-read the selected text and replace the anchor with it.
+    case recapture
+}
+
+/// Where the highlight belongs after a repaint.
+public enum KilterAnchorLanding: Equatable, Sendable {
+    /// Already sitting on its own text — nothing to do (the fast path).
+    case hold
+    /// Found, and the WHOLE span verified: move the selection here.
+    case move(startRow: Int)
+    /// Not on the glass, or found but unverifiable. The highlight goes
+    /// away; **the anchor does not.** It comes back with its text.
+    case dormant
+}
+
+/// §1.8's decisions, with nothing else attached.
+public enum KilterAnchorPolicy {
+
+    /// THE LAW: what an event does to the anchor.
+    ///
+    /// The default is `keep`, and that is not an implementation detail —
+    /// it is the whole fix. Every recurrence of this bug has been some
+    /// new code path discovering that it, too, could quietly drop the
+    /// anchor. Here there is exactly one way to say `drop`, and it takes
+    /// a deliberate human act to reach it.
+    public static func verdict(for event: KilterAnchorEvent) -> KilterAnchorVerdict {
+        switch event {
+        case .userDismissedDeliberately, .readingModeEntered:
+            return .drop
+        case .userGestureChangedSelection(let onAlternateBuffer):
+            // On the NORMAL buffer the selection's rows are
+            // content-absolute and survive scrolling by construction, so
+            // there is nothing to anchor and a stale anchor would only
+            // lie. On the ALTERNATE screen the anchor is the mechanism.
+            return onAlternateBuffer ? .recapture : .drop
+        case .selectionDeactivated, .reanchorerMovedIt, .hostRepaint:
+            return .keep
+        }
+    }
+
+    /// THE SEARCH: given the anchor and a way to read the display
+    /// buffer, where does the highlight re-land?
+    ///
+    /// Pure by construction — the two closures are the only contact with
+    /// the terminal, so every branch is reachable from a test.
+    ///
+    /// - Parameters:
+    ///   - anchor: the span to find.
+    ///   - activeSpan: the text under the CURRENT selection, or nil when
+    ///     no selection is active. Normalized by the caller's read.
+    ///   - rowCount: rows in the display buffer.
+    ///   - rowTail: row → that row's text from `anchor.startCol`
+    ///     rightward, right-trimmed. Searching by the SELECTED TEXT at
+    ///     its own column (not the full row) is what makes this survive
+    ///     herdr's static rail — the thing beside the pane does not move
+    ///     when the pane scrolls, and full-row equality only ever
+    ///     matched at the original position.
+    ///   - spanText: candidate start row → the full normalized span that
+    ///     would be selected there. The verification gate: a candidate
+    ///     that does not reproduce the anchor's text EXACTLY is refused,
+    ///     which is why the July wrong-text bug cannot recur.
+    public static func locate(
+        anchor: KilterSelectionAnchor,
+        activeSpan: String?,
+        rowCount: Int,
+        rowTail: (Int) -> String,
+        spanText: (Int) -> String
+    ) -> KilterAnchorLanding {
+        // Fast path: the highlight is already on its words.
+        if let activeSpan, activeSpan == anchor.text { return .hold }
+        var best: Int?
+        var row = 0
+        while row + anchor.rowSpan < rowCount {
+            defer { row += 1 }
+            guard rowTail(row).hasPrefix(anchor.firstSelLine) else { continue }
+            // Nearest to where it last stood wins — a transcript repeats
+            // itself, and the honest tiebreak is "the one closest to
+            // where the reader's eyes were". Documented heuristic, not a
+            // guarantee (build 82's stated limit).
+            if let b = best,
+               abs(b - anchor.lastStartRow) <= abs(row - anchor.lastStartRow) { continue }
+            best = row
+        }
+        guard let found = best else { return .dormant }
+        guard spanText(found) == anchor.text else { return .dormant }
+        return .move(startRow: found)
+    }
+}
