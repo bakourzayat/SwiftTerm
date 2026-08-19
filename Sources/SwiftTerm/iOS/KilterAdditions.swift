@@ -52,7 +52,9 @@ public extension TerminalView {
         // ships — and the rigs that verify handle drags (kelter #33) must
         // exercise the exact same recognizer the finger meets.
         enableSelectionPanGesture()
-        kilterCaptureSelectionAnchor()   // §1.8: pencil-down is a user gesture
+        kilterFingerOwnsSelection = true    // the pencil IS the finger
+        kilterCaptureSelectionAnchor()      // §1.8: pencil-down is a user gesture
+        kilterFingerOwnsSelection = false
         setNeedsDisplay(bounds)
     }
 
@@ -66,7 +68,9 @@ public extension TerminalView {
         }
         selection.setSelection(start: selection.start,
                                end: kilterContentPosition(at: point))
-        kilterCaptureSelectionAnchor()   // §1.8: pencil drag is a user gesture
+        kilterFingerOwnsSelection = true    // the pencil IS the finger
+        kilterCaptureSelectionAnchor()      // §1.8: pencil drag is a user gesture
+        kilterFingerOwnsSelection = false
         setNeedsDisplay(bounds)
     }
 
@@ -141,6 +145,18 @@ public extension TerminalView {
             _ = KilterAnchorPolicy.verdict(for: .selectionDeactivated)  // .keep
             return
         }
+        // THE FINGER GATE COMES FIRST, BEFORE ANYTHING CAN TOUCH THE
+        // ANCHOR (owner 2026-08-19). This guard used to sit at the BOTTOM,
+        // below the alt-buffer branch — so a frame where
+        // `isCurrentBufferAlternate` read false (a pager settle, a tmux
+        // repaint) NILLED the anchor with no finger anywhere near the
+        // glass, and the next automatic capture then wrote the short live
+        // span into the empty slot. The rig measured it: 10 lines → 8 at
+        // step 54, with `clipped=0`. Intent is now untouchable unless a
+        // finger is driving.
+        guard KilterAnchorPolicy.captureVerdict(
+            current: kilterAnchor, candidate: "",
+            fingerOwnsSelection: kilterFingerOwnsSelection) == .recapture else { return }
         let t = getTerminal()
         let onAlt = t.isCurrentBufferAlternate
         switch KilterAnchorPolicy.verdict(
@@ -151,6 +167,7 @@ public extension TerminalView {
             // Normal buffer: rows are content-absolute and survive a
             // scroll by construction, so a fresh selection here replaces
             // the anchor with nothing rather than leaving a stale one.
+            // Reachable only with a finger on the glass, per the gate above.
             kilterAnchor = nil
             return
         case .recapture:
@@ -167,6 +184,34 @@ public extension TerminalView {
             firstSelLine: firstSel,
             startCol: s.col, endCol: e.col,
             rowSpan: e.row - s.row, lastStartRow: s.row)
+    }
+
+    /// WHAT THE USER SELECTED, whatever is currently on the glass. While
+    /// the highlight is clipped to the visible rows the live selection is
+    /// a projection, so reading it back is how a scroll silently truncated
+    /// a copy (owner 2026-08-19). Copy, Speak and every other verb that
+    /// consumes "the selection" must ask this.
+    var kilterSelectionIntentText: String {
+        // THE ANCHOR *IS* INTENT. Nothing but a finger can write it (see
+        // `captureVerdict`), so whenever one exists it is by definition
+        // what he selected — no need to guess from the live range.
+        //
+        // The first cut asked "is the live text a shorter piece of the
+        // anchor?" and answered with the live text when it was not. The
+        // rig showed why that fails: drift does not produce a substring,
+        // it produces DIFFERENT text of a different length, so a drifted
+        // 8-line span was reported as intent over an intact 10-line
+        // anchor.
+        if let anchor = kilterAnchor { return anchor.text }
+        return selection.getSelectedText()
+    }
+
+    /// True while the highlight on screen is only part of what is
+    /// selected — the rest has scrolled out of the buffer. kelter uses it
+    /// to tell the truth in the UI instead of pretending.
+    var kilterSelectionIsClipped: Bool {
+        guard let anchor = kilterAnchor else { return false }
+        return kilterNormalizedSpan(selection.getSelectedText()) != anchor.text
     }
 
     /// §1.8 — the ONE way the anchor dies: the user dismissed the
@@ -240,9 +285,9 @@ public extension TerminalView {
                 let base = lines.upperBound == 0 ? anchor.startCol : 0
                 endCol = max(base, base + anchorLines[lines.upperBound].count - 1)
             }
-            selection.setSelection(
-                start: Position(col: startCol, row: row + lines.lowerBound),
-                end: Position(col: endCol, row: row + lines.upperBound))
+            let placedStart = Position(col: startCol, row: row + lines.lowerBound)
+            let placedEnd = Position(col: endCol, row: row + lines.upperBound)
+            selection.setSelection(start: placedStart, end: placedEnd)
             kilterAnchor?.lastStartRow = row
             requestDisplay()
         case .dormant:
@@ -253,6 +298,7 @@ public extension TerminalView {
                 selection.selectNone()
                 requestDisplay()
             }
+            // Nothing is drawn — but the ANCHOR still stands.
         }
     }
 

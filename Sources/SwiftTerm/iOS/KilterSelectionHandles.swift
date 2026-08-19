@@ -124,6 +124,9 @@ public extension TerminalView {
             selection.pivot = handle.isStart ? selection.end : selection.start
             kilterActiveHandlePan = g
             kilterActiveHandleIsStart = handle.isStart
+            // A FINGER ON A GRABBER OWNS THE SELECTION until it lifts —
+            // it alone may make the passage smaller (owner 2026-08-19).
+            kilterFingerOwnsSelection = true
             kilterSeedPivotNeedle(draggingStart: handle.isStart)
         case .changed:
             // While the edge ticker scrolls the remote, the content under
@@ -152,8 +155,10 @@ public extension TerminalView {
             kilterStopHandleAutoScroll()
             kilterActiveHandlePan = nil
             // The paint settles at release — NOW the anchor learns the
-            // final span, once, whole.
+            // final span, once, whole. The finger still owns it for this
+            // one capture; it lets go immediately after.
             kilterCaptureSelectionAnchor()
+            kilterFingerOwnsSelection = false
             kilterUpdateSelectionHandles()
             // Apple's grammar (owner 2026-08-14: "once you release your
             // finger, it shows you back again"): release = the verbs
@@ -232,6 +237,7 @@ public extension TerminalView {
         guard selection.active else { return }
         selection.pivot = draggingStart ? selection.end : selection.start
         kilterActiveHandleIsStart = draggingStart
+        kilterFingerOwnsSelection = true
         kilterSeedPivotNeedle(draggingStart: draggingStart)
         kilterEdgeDragActive = true
     }
@@ -248,6 +254,7 @@ public extension TerminalView {
     public func kilterDebugEdgeDragEnd() {
         kilterEdgeDragActive = false
         kilterCaptureSelectionAnchor()
+        kilterFingerOwnsSelection = false
     }
 
     /// How far past the scroll threshold the finger sits, in GLASS space —

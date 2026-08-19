@@ -168,6 +168,71 @@ public enum KilterAnchorPolicy {
         }
     }
 
+    /// THE ANCHOR IS INTENT, AND ONLY THE FINGER MAY SHRINK IT (owner,
+    /// 2026-08-19, in herdr and in Claude Code — both alternate screens,
+    /// neither with scrollback): *"every time you're scrolling over that
+    /// the selection you did gets shorter, because that's what's visible…
+    /// until it's completely gone… you cannot actually select a full
+    /// text."*
+    ///
+    /// The partial-visibility rule (2026-08-18) clips the LIVE selection
+    /// to the rows still on the glass — right for DRAWING. The erosion is
+    /// one step later: every capture site reads `selection.start…end`, so
+    /// a capture taken while the highlight was clipped rewrote the anchor
+    /// with the clip. On a screen with no scrollback that is monotonic and
+    /// irreversible.
+    ///
+    /// The first cut of this rule compared the candidate against the exact
+    /// text the re-anchorer had drawn — and the alt-screen rig broke it in
+    /// one run: between revalidation frames the live selection DRIFTS (the
+    /// host repaints under it) so there is no projection on record, and
+    /// the capture ate the anchor anyway (measured: 10 lines → 1 → 8).
+    /// Text equality was the wrong discriminator. PROVENANCE is the right
+    /// one: a capture may widen or replace the anchor whenever it likes,
+    /// but it may only NARROW it while a finger is actually on the glass
+    /// driving the selection. Nothing else in the system is allowed to
+    /// make a passage smaller.
+    ///
+    /// - Parameters:
+    ///   - current: the anchor as it stands, or nil if there is none.
+    ///   - candidate: the normalized text under the live selection.
+    ///   - fingerOwnsSelection: true only while a selection-manipulating
+    ///     gesture is live — a grabber drag, a pencil drag, a long-press
+    ///     pick, an edge drag. False for every automatic capture.
+    public static func captureVerdict(
+        current: KilterSelectionAnchor?,
+        candidate: String,
+        fingerOwnsSelection: Bool
+    ) -> KilterAnchorVerdict {
+        // Nothing to protect yet — the first selection is always intent.
+        guard current != nil else { return .recapture }
+        // THE ANCHOR UPDATES ONLY AT THE FINGER. `d6aa0c9` said this in
+        // 2026-08-14 and it was never actually enforced at the capture
+        // layer, which is how the erosion kept finding new doors.
+        //
+        // Two weaker rules were tried and both were broken by the
+        // alt-screen rig, which is why this one is absolute:
+        //   · "refuse when the text equals what we drew" — between frames
+        //     the live selection DRIFTS under the host's repaint, so there
+        //     was nothing to compare against (10 lines → 1 at step 49).
+        //   · "refuse anything shorter" — drift does not produce a
+        //     SUBSTRING, it produces different text of a different length,
+        //     so a shorter-but-unrelated span walked straight past it
+        //     (10 lines → 4 at step 38).
+        // Nothing automatic gets to rewrite what he selected. Only a
+        // finger on the glass does.
+        return fingerOwnsSelection ? .recapture : .keep
+    }
+
+    /// True when `candidate` is a strictly smaller piece of `text` — the
+    /// shape every erosion took, whether the head, the tail or a middle
+    /// run survived the scroll.
+    public static func isNarrowing(candidate: String, of text: String) -> Bool {
+        guard !candidate.isEmpty else { return true }
+        guard candidate.count < text.count else { return false }
+        return text.contains(candidate)
+    }
+
     /// THE SEARCH: given the anchor and a way to read the display
     /// buffer, where does the highlight re-land?
     ///

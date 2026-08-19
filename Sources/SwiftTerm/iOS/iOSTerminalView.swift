@@ -535,7 +535,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
 
     @objc open override func copy(_ sender: Any?) {
-        UIPasteboard.general.string = selection.getSelectedText()
+        // WHAT HE SELECTED, NOT WHAT SURVIVED THE SCROLL (owner
+        // 2026-08-19). While the highlight is clipped to the rows still
+        // on the glass, `getSelectedText()` reads the CLIP — so copying
+        // after a scroll silently handed back a fraction of the passage
+        // and said nothing. The anchor holds the text as it was when he
+        // selected it; that is the honest answer.
+        UIPasteboard.general.string = kilterSelectionIntentText
         selection.selectNone()
         disableSelectionPanGesture()
     }
@@ -550,7 +556,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         if let loc = lastLongSelect {
             selection.selectWordOrExpression(at: Position (col: loc.col, row: loc.row), in: terminal.displayBuffer)
             selection.selectionMode = .character
-            kilterCaptureSelectionAnchor()   // §1.8: user gesture = capture
+            kilterFingerOwnsSelection = true   // a fresh pick is his own
+            kilterCaptureSelectionAnchor()     // §1.8: user gesture = capture
+            kilterFingerOwnsSelection = false
             enableSelectionPanGesture()
             DispatchQueue.main.async {
                 self.showContextMenu(forRegion:  self.makeContextMenuRegionForSelection(), pos: loc)
@@ -958,6 +966,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     // WHAT is selected, so repaints can re-find it; the flag keeps the
     // re-anchorer's own selection writes from re-capturing themselves.
     var kilterAnchor: KilterSelectionAnchor?
+    /// §1.8 — true only while a FINGER is driving the selection: a
+    /// grabber drag, a pencil drag, a long-press pick, an edge drag.
+    /// Capture consults it, because only the finger may make a passage
+    /// SMALLER (owner 2026-08-19: *"every time you're scrolling over that
+    /// the selection you did gets shorter… you cannot actually select a
+    /// full text"*). Every automatic capture leaves intent alone.
+    var kilterFingerOwnsSelection = false
     var kilterReanchoring = false
     
     @objc func panSelectionHandler (_ gestureRecognizer: UIPanGestureRecognizer) {
@@ -1000,7 +1015,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             if selection.active {
                 stopSelectionTimer()
                 selection.pivotExtend(bufferPosition: hit)
-                kilterCaptureSelectionAnchor()   // §1.8: the finger is the truth
+                kilterFingerOwnsSelection = true   // this IS the finger
+                kilterCaptureSelectionAnchor()     // §1.8: the finger is the truth
+                kilterFingerOwnsSelection = false
                 gestureRecognizer.setTranslation(CGPoint.zero, in: self)
                 if absoluteY < 0 || absoluteY > bounds.height {
                     startSelectionTimer {
